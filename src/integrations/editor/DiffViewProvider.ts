@@ -33,9 +33,7 @@ export class DiffViewProvider {
 		this.isEditing = true
 		// if the file is already open, ensure it's not dirty before getting its contents
 		if (fileExists) {
-			const existingDocument = vscode.workspace.textDocuments.find((doc) =>
-				arePathsEqual(doc.uri.fsPath, absolutePath)
-			)
+			const existingDocument = vscode.workspace.textDocuments.find((doc) => arePathsEqual(doc.uri.fsPath, absolutePath))
 			if (existingDocument && existingDocument.isDirty) {
 				await existingDocument.save()
 			}
@@ -61,9 +59,7 @@ export class DiffViewProvider {
 		const tabs = vscode.window.tabGroups.all
 			.map((tg) => tg.tabs)
 			.flat()
-			.filter(
-				(tab) => tab.input instanceof vscode.TabInputText && arePathsEqual(tab.input.uri.fsPath, absolutePath)
-			)
+			.filter((tab) => tab.input instanceof vscode.TabInputText && arePathsEqual(tab.input.uri.fsPath, absolutePath))
 		for (const tab of tabs) {
 			if (!tab.isDirty) {
 				await vscode.window.tabGroups.close(tab)
@@ -83,6 +79,15 @@ export class DiffViewProvider {
 		if (!this.relPath || !this.activeLineController || !this.fadedOverlayController) {
 			throw new Error("Required values not set")
 		}
+
+		// --- Fix to prevent duplicate BOM ---
+		// Strip potential BOM from incoming content. VS Code's `applyEdit` might implicitly handle the BOM
+		// when replacing from the start (0,0), and we want to avoid duplication.
+		// Final BOM is handled in `saveChanges`.
+		if (accumulatedContent.startsWith("\ufeff")) {
+			accumulatedContent = accumulatedContent.slice(1) // Remove the BOM character
+		}
+
 		this.newContent = accumulatedContent
 		const accumulatedLines = accumulatedContent.split("\n")
 		if (!isFinal) {
@@ -141,19 +146,33 @@ export class DiffViewProvider {
 	async saveChanges(): Promise<{
 		newProblemsMessage: string | undefined
 		userEdits: string | undefined
+		autoFormattingEdits: string | undefined
 		finalContent: string | undefined
 	}> {
 		if (!this.relPath || !this.newContent || !this.activeDiffEditor) {
-			return { newProblemsMessage: undefined, userEdits: undefined, finalContent: undefined }
+			return {
+				newProblemsMessage: undefined,
+				userEdits: undefined,
+				autoFormattingEdits: undefined,
+				finalContent: undefined,
+			}
 		}
 		const absolutePath = path.resolve(this.cwd, this.relPath)
 		const updatedDocument = this.activeDiffEditor.document
-		const editedContent = updatedDocument.getText()
+
+		// get the contents before save operation which may do auto-formatting
+		const preSaveContent = updatedDocument.getText()
+
 		if (updatedDocument.isDirty) {
 			await updatedDocument.save()
 		}
 
-		await vscode.window.showTextDocument(vscode.Uri.file(absolutePath), { preview: false })
+		// get text after save in case there is any auto-formatting done by the editor
+		const postSaveContent = updatedDocument.getText()
+
+		await vscode.window.showTextDocument(vscode.Uri.file(absolutePath), {
+			preview: false,
+		})
 		await this.closeAllDiffViews()
 
 		/*
@@ -179,27 +198,43 @@ export class DiffViewProvider {
 			[
 				vscode.DiagnosticSeverity.Error, // only including errors since warnings can be distracting (if user wants to fix warnings they can use the @problems mention)
 			],
-			this.cwd
+			this.cwd,
 		) // will be empty string if no errors
 		const newProblemsMessage =
 			newProblems.length > 0 ? `\n\nNew problems detected after saving the file:\n${newProblems}` : ""
 
 		// If the edited content has different EOL characters, we don't want to show a diff with all the EOL differences.
 		const newContentEOL = this.newContent.includes("\r\n") ? "\r\n" : "\n"
-		const normalizedEditedContent = editedContent.replace(/\r\n|\n/g, newContentEOL).trimEnd() + newContentEOL // trimEnd to fix issue where editor adds in extra new line automatically
+		const normalizedPreSaveContent = preSaveContent.replace(/\r\n|\n/g, newContentEOL).trimEnd() + newContentEOL // trimEnd to fix issue where editor adds in extra new line automatically
+		const normalizedPostSaveContent = postSaveContent.replace(/\r\n|\n/g, newContentEOL).trimEnd() + newContentEOL // this is the final content we return to the model to use as the new baseline for future edits
 		// just in case the new content has a mix of varying EOL characters
 		const normalizedNewContent = this.newContent.replace(/\r\n|\n/g, newContentEOL).trimEnd() + newContentEOL
-		if (normalizedEditedContent !== normalizedNewContent) {
-			// user made changes before approving edit
-			const userEdits = formatResponse.createPrettyPatch(
-				this.relPath.toPosix(),
-				normalizedNewContent,
-				normalizedEditedContent
-			)
-			return { newProblemsMessage, userEdits, finalContent: normalizedEditedContent }
+
+		let userEdits: string | undefined
+		if (normalizedPreSaveContent !== normalizedNewContent) {
+			// user made changes before approving edit. let the model know about user made changes (not including post-save auto-formatting changes)
+			userEdits = formatResponse.createPrettyPatch(this.relPath.toPosix(), normalizedNewContent, normalizedPreSaveContent)
+			// return { newProblemsMessage, userEdits, finalContent: normalizedPostSaveContent }
 		} else {
 			// no changes to cline's edits
-			return { newProblemsMessage, userEdits: undefined, finalContent: normalizedEditedContent }
+			// return { newProblemsMessage, userEdits: undefined, finalContent: normalizedPostSaveContent }
+		}
+
+		let autoFormattingEdits: string | undefined
+		if (normalizedPreSaveContent !== normalizedPostSaveContent) {
+			// auto-formatting was done by the editor
+			autoFormattingEdits = formatResponse.createPrettyPatch(
+				this.relPath.toPosix(),
+				normalizedPreSaveContent,
+				normalizedPostSaveContent,
+			)
+		}
+
+		return {
+			newProblemsMessage,
+			userEdits,
+			autoFormattingEdits,
+			finalContent: normalizedPostSaveContent,
 		}
 	}
 
@@ -227,7 +262,7 @@ export class DiffViewProvider {
 			const edit = new vscode.WorkspaceEdit()
 			const fullRange = new vscode.Range(
 				updatedDocument.positionAt(0),
-				updatedDocument.positionAt(updatedDocument.getText().length)
+				updatedDocument.positionAt(updatedDocument.getText().length),
 			)
 			edit.replace(updatedDocument.uri, fullRange, this.originalContent ?? "")
 			// Apply the edit and save, since contents shouldnt have changed this wont show in local history unless of course the user made changes and saved during the edit
@@ -249,10 +284,7 @@ export class DiffViewProvider {
 	private async closeAllDiffViews() {
 		const tabs = vscode.window.tabGroups.all
 			.flatMap((tg) => tg.tabs)
-			.filter(
-				(tab) =>
-					tab.input instanceof vscode.TabInputTextDiff && tab.input?.original?.scheme === DIFF_VIEW_URI_SCHEME
-			)
+			.filter((tab) => tab.input instanceof vscode.TabInputTextDiff && tab.input?.original?.scheme === DIFF_VIEW_URI_SCHEME)
 		for (const tab of tabs) {
 			// trying to close dirty views results in save popup
 			if (!tab.isDirty) {
@@ -273,7 +305,7 @@ export class DiffViewProvider {
 				(tab) =>
 					tab.input instanceof vscode.TabInputTextDiff &&
 					tab.input?.original?.scheme === DIFF_VIEW_URI_SCHEME &&
-					arePathsEqual(tab.input.modified.fsPath, uri.fsPath)
+					arePathsEqual(tab.input.modified.fsPath, uri.fsPath),
 			)
 		if (diffTab && diffTab.input instanceof vscode.TabInputTextDiff) {
 			const editor = await vscode.window.showTextDocument(diffTab.input.modified)
@@ -295,7 +327,7 @@ export class DiffViewProvider {
 					query: Buffer.from(this.originalContent ?? "").toString("base64"),
 				}),
 				uri,
-				`${fileName}: ${fileExists ? "Original ↔ Cline's Changes" : "New File"} (Editable)`
+				`${fileName}: ${fileExists ? "Original ↔ Cline's Changes" : "New File"} (Editable)`,
 			)
 			// This may happen on very slow machines ie project idx
 			setTimeout(() => {
@@ -310,7 +342,7 @@ export class DiffViewProvider {
 			const scrollLine = line + 4
 			this.activeDiffEditor.revealRange(
 				new vscode.Range(scrollLine, 0, scrollLine, 0),
-				vscode.TextEditorRevealType.InCenter
+				vscode.TextEditorRevealType.InCenter,
 			)
 		}
 	}
@@ -327,7 +359,7 @@ export class DiffViewProvider {
 				// Found the first diff, scroll to it
 				this.activeDiffEditor.revealRange(
 					new vscode.Range(lineCount, 0, lineCount, 0),
-					vscode.TextEditorRevealType.InCenter
+					vscode.TextEditorRevealType.InCenter,
 				)
 				return
 			}

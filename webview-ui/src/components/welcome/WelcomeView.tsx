@@ -1,16 +1,21 @@
 import { VSCodeButton, VSCodeLink } from "@vscode/webview-ui-toolkit/react"
-import { useEffect, useState } from "react"
-import { useExtensionState } from "../../context/ExtensionStateContext"
-import { validateApiConfiguration } from "../../utils/validate"
-import { vscode } from "../../utils/vscode"
-import ApiOptions from "../settings/ApiOptions"
+import { useEffect, useState, memo } from "react"
+import { useExtensionState } from "@/context/ExtensionStateContext"
+import { validateApiConfiguration } from "@/utils/validate"
+import { vscode } from "@/utils/vscode"
+import ApiOptions from "@/components/settings/ApiOptions"
+import ClineLogoWhite from "@/assets/ClineLogoWhite"
 
-const WelcomeView = () => {
+const WelcomeView = memo(() => {
 	const { apiConfiguration } = useExtensionState()
-
 	const [apiErrorMessage, setApiErrorMessage] = useState<string | undefined>(undefined)
+	const [showApiOptions, setShowApiOptions] = useState(false)
 
 	const disableLetsGoButton = apiErrorMessage != null
+
+	const handleLogin = () => {
+		vscode.postMessage({ type: "accountLoginClicked" })
+	}
 
 	const handleSubmit = () => {
 		vscode.postMessage({ type: "apiConfiguration", apiConfiguration })
@@ -21,29 +26,53 @@ const WelcomeView = () => {
 	}, [apiConfiguration])
 
 	return (
-		<div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, padding: "0 20px" }}>
-			<h2>Hi, I'm Cline</h2>
-			<p>
-				I can do all kinds of tasks thanks to the latest breakthroughs in{" "}
-				<VSCodeLink
-					href="https://www-cdn.anthropic.com/fed9cc193a14b84131812372d8d5857f8f304c52/Model_Card_Claude_3_Addendum.pdf"
-					style={{ display: "inline" }}>
-					Claude 3.5 Sonnet's agentic coding capabilities
-				</VSCodeLink>{" "}
-				and access to tools that let me create & edit files, explore complex projects, use the browser, and
-				execute terminal commands (with your permission, of course).
-			</p>
+		<div className="fixed inset-0 p-0 flex flex-col">
+			<div className="h-full px-5 overflow-auto">
+				<h2>Hi, I'm Cline</h2>
+				<div className="flex justify-center my-5">
+					<ClineLogoWhite className="size-16" />
+				</div>
+				<p>
+					I can do all kinds of tasks thanks to breakthroughs in{" "}
+					<VSCodeLink href="https://www.anthropic.com/claude/sonnet" className="inline">
+						Claude 3.7 Sonnet's
+					</VSCodeLink>
+					agentic coding capabilities and access to tools that let me create & edit files, explore complex projects, use
+					a browser, and execute terminal commands <i>(with your permission, of course)</i>. I can even use MCP to
+					create new tools and extend my own capabilities.
+				</p>
 
-			<b>To get started, this extension needs an API provider for Claude 3.5 Sonnet.</b>
+				<p className="text-[var(--vscode-descriptionForeground)]">
+					Sign up for an account to get started for free, or use an API key that provides access to models like Claude
+					3.7 Sonnet.
+				</p>
 
-			<div style={{ marginTop: "10px" }}>
-				<ApiOptions showModelOptions={false} />
-				<VSCodeButton onClick={handleSubmit} disabled={disableLetsGoButton} style={{ marginTop: "3px" }}>
-					Let's go!
+				<VSCodeButton appearance="primary" onClick={handleLogin} className="w-full mt-1">
+					Get Started for Free
 				</VSCodeButton>
+
+				{!showApiOptions && (
+					<VSCodeButton
+						appearance="secondary"
+						onClick={() => setShowApiOptions(!showApiOptions)}
+						className="mt-2.5 w-full">
+						Use your own API key
+					</VSCodeButton>
+				)}
+
+				<div className="mt-4.5">
+					{showApiOptions && (
+						<div>
+							<ApiOptions showModelOptions={false} />
+							<VSCodeButton onClick={handleSubmit} disabled={disableLetsGoButton} className="mt-0.75">
+								Let's go!
+							</VSCodeButton>
+						</div>
+					)}
+				</div>
 			</div>
 		</div>
 	)
-}
+})
 
 export default WelcomeView

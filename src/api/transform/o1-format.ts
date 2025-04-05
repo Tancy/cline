@@ -167,7 +167,7 @@ I've analyzed the project structure, but I need more information to proceed. Let
 
 export function convertToO1Messages(
 	openAiMessages: OpenAI.Chat.ChatCompletionMessageParam[],
-	systemPrompt: string
+	systemPrompt: string,
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
 	const toolsReplaced = openAiMessages.reduce((acc, message) => {
 		if (message.role === "tool") {
@@ -244,7 +244,10 @@ const toolNames = [
 	"attempt_completion",
 ]
 
-function parseAIResponse(response: string): { normalText: string; toolCalls: ToolCall[] } {
+function parseAIResponse(response: string): {
+	normalText: string
+	toolCalls: ToolCall[]
+} {
 	// Create a regex pattern to match any tool call opening tag
 	const toolCallPattern = new RegExp(`<(${toolNames.join("|")})`, "i")
 	const match = response.match(toolCallPattern)
@@ -304,7 +307,7 @@ function parseToolCall(toolName: string, content: string): ToolCall | null {
 
 	// Parse nested XML elements
 	const paramRegex = /<(\w+)>([\s\S]*?)<\/\1>/gs
-	let match
+	let match: RegExpExecArray | null
 
 	while ((match = paramRegex.exec(innerContent)) !== null) {
 		const [, paramName, paramValue] = match
@@ -360,7 +363,7 @@ function validateToolInput(toolName: string, tool_input: Record<string, string>)
 
 // Convert OpenAI response to Anthropic format
 export function convertO1ResponseToAnthropicMessage(
-	completion: OpenAI.Chat.Completions.ChatCompletion
+	completion: OpenAI.Chat.Completions.ChatCompletion,
 ): Anthropic.Messages.Message {
 	const openAiMessage = completion.choices[0].message
 	const { normalText, toolCalls } = parseAIResponse(openAiMessage.content || "")
@@ -373,6 +376,7 @@ export function convertO1ResponseToAnthropicMessage(
 			{
 				type: "text",
 				text: normalText,
+				citations: null,
 			},
 		],
 		model: completion.model,
@@ -393,6 +397,8 @@ export function convertO1ResponseToAnthropicMessage(
 		usage: {
 			input_tokens: completion.usage?.prompt_tokens || 0,
 			output_tokens: completion.usage?.completion_tokens || 0,
+			cache_creation_input_tokens: null,
+			cache_read_input_tokens: null,
 		},
 	}
 
@@ -405,7 +411,7 @@ export function convertO1ResponseToAnthropicMessage(
 					name: toolCall.tool,
 					input: toolCall.tool_input,
 				}
-			})
+			}),
 		)
 	}
 

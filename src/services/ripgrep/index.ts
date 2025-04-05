@@ -1,8 +1,9 @@
 import * as vscode from "vscode"
 import * as childProcess from "child_process"
 import * as path from "path"
-import * as fs from "fs"
 import * as readline from "readline"
+import { fileExistsAtPath } from "../../utils/fs"
+import { ClineIgnoreController } from "../../core/ignore/ClineIgnoreController"
 
 /*
 This file provides functionality to perform regex searches on files using ripgrep.
@@ -50,7 +51,7 @@ const isWindows = /^win/.test(process.platform)
 const binName = isWindows ? "rg.exe" : "rg"
 
 interface SearchResult {
-	file: string
+	filePath: string
 	line: number
 	column: number
 	match: string
@@ -60,10 +61,10 @@ interface SearchResult {
 
 const MAX_RESULTS = 300
 
-async function getBinPath(vscodeAppRoot: string): Promise<string | undefined> {
+export async function getBinPath(vscodeAppRoot: string): Promise<string | undefined> {
 	const checkPath = async (pkgFolder: string) => {
 		const fullPath = path.join(vscodeAppRoot, pkgFolder, binName)
-		return (await pathExists(fullPath)) ? fullPath : undefined
+		return (await fileExistsAtPath(fullPath)) ? fullPath : undefined
 	}
 
 	return (
@@ -72,14 +73,6 @@ async function getBinPath(vscodeAppRoot: string): Promise<string | undefined> {
 		(await checkPath("node_modules.asar.unpacked/vscode-ripgrep/bin/")) ||
 		(await checkPath("node_modules.asar.unpacked/@vscode/ripgrep/bin/"))
 	)
-}
-
-async function pathExists(path: string): Promise<boolean> {
-	return new Promise((resolve) => {
-		fs.access(path, (err) => {
-			resolve(err === null)
-		})
-	})
 }
 
 async function execRipgrep(bin: string, args: string[]): Promise<string> {
@@ -126,7 +119,8 @@ export async function regexSearchFiles(
 	cwd: string,
 	directoryPath: string,
 	regex: string,
-	filePattern?: string
+	filePattern?: string,
+	clineIgnoreController?: ClineIgnoreController,
 ): Promise<string> {
 	const vscodeAppRoot = vscode.env.appRoot
 	const rgPath = await getBinPath(vscodeAppRoot)
@@ -155,7 +149,7 @@ export async function regexSearchFiles(
 						results.push(currentResult as SearchResult)
 					}
 					currentResult = {
-						file: parsed.data.path.text,
+						filePath: parsed.data.path.text,
 						line: parsed.data.line_number,
 						column: parsed.data.submatches[0].start,
 						match: parsed.data.lines.text,
@@ -179,7 +173,12 @@ export async function regexSearchFiles(
 		results.push(currentResult as SearchResult)
 	}
 
-	return formatResults(results, cwd)
+	// Filter results using ClineIgnoreController if provided
+	const filteredResults = clineIgnoreController
+		? results.filter((result) => clineIgnoreController.validateAccess(result.filePath))
+		: results
+
+	return formatResults(filteredResults, cwd)
 }
 
 function formatResults(results: SearchResult[], cwd: string): string {
@@ -194,7 +193,7 @@ function formatResults(results: SearchResult[], cwd: string): string {
 
 	// Group results by file name
 	results.slice(0, MAX_RESULTS).forEach((result) => {
-		const relativeFilePath = path.relative(cwd, result.file)
+		const relativeFilePath = path.relative(cwd, result.filePath)
 		if (!groupedResults[relativeFilePath]) {
 			groupedResults[relativeFilePath] = []
 		}

@@ -4,13 +4,19 @@ import React, { KeyboardEvent, memo, useEffect, useMemo, useRef, useState } from
 import { useRemark } from "react-remark"
 import { useMount } from "react-use"
 import styled from "styled-components"
-import { openRouterDefaultModelId } from "../../../../src/shared/api"
-import { useExtensionState } from "../../context/ExtensionStateContext"
-import { vscode } from "../../utils/vscode"
+import { openRouterDefaultModelId } from "@shared/api"
+import { useExtensionState } from "@/context/ExtensionStateContext"
+import { vscode } from "@/utils/vscode"
 import { highlight } from "../history/HistoryView"
 import { ModelInfoView, normalizeApiConfiguration } from "./ApiOptions"
+import { CODE_BLOCK_BG_COLOR } from "@/components/common/CodeBlock"
+import ThinkingBudgetSlider from "./ThinkingBudgetSlider"
 
-const OpenRouterModelPicker: React.FC = () => {
+export interface OpenRouterModelPickerProps {
+	isPopup?: boolean
+}
+
+const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup }) => {
 	const { apiConfiguration, setApiConfiguration, openRouterModels } = useExtensionState()
 	const [searchTerm, setSearchTerm] = useState(apiConfiguration?.openRouterModelId || openRouterDefaultModelId)
 	const [isDropdownVisible, setIsDropdownVisible] = useState(false)
@@ -24,8 +30,10 @@ const OpenRouterModelPicker: React.FC = () => {
 		// could be setting invalid model id/undefined info but validation will catch it
 		setApiConfiguration({
 			...apiConfiguration,
-			openRouterModelId: newModelId,
-			openRouterModelInfo: openRouterModels[newModelId],
+			...{
+				openRouterModelId: newModelId,
+				openRouterModelInfo: openRouterModels[newModelId],
+			},
 		})
 		setSearchTerm(newModelId)
 	}
@@ -52,8 +60,12 @@ const OpenRouterModelPicker: React.FC = () => {
 	}, [])
 
 	const modelIds = useMemo(() => {
-		return Object.keys(openRouterModels).sort((a, b) => a.localeCompare(b))
-	}, [openRouterModels])
+		const unfilteredModelIds = Object.keys(openRouterModels).sort((a, b) => a.localeCompare(b))
+
+		return apiConfiguration?.apiProvider === "cline"
+			? unfilteredModelIds.filter((id) => !id.includes(":free"))
+			: unfilteredModelIds
+	}, [openRouterModels, apiConfiguration?.apiProvider])
 
 	const searchableItems = useMemo(() => {
 		return modelIds.map((id) => ({
@@ -75,7 +87,7 @@ const OpenRouterModelPicker: React.FC = () => {
 	}, [searchableItems])
 
 	const modelSearchResults = useMemo(() => {
-		let results: { id: string; html: string }[] = searchTerm
+		const results: { id: string; html: string }[] = searchTerm
 			? highlight(fuse.search(searchTerm), "model-item-highlight")
 			: searchableItems
 		// results.sort((a, b) => a.id.localeCompare(b.id)) NOTE: sorting like this causes ids in objects to be reordered and mismatched
@@ -109,7 +121,11 @@ const OpenRouterModelPicker: React.FC = () => {
 	}
 
 	const hasInfo = useMemo(() => {
-		return modelIds.some((id) => id.toLowerCase() === searchTerm.toLowerCase())
+		try {
+			return modelIds.some((id) => id.toLowerCase() === searchTerm.toLowerCase())
+		} catch {
+			return false
+		}
 	}, [modelIds, searchTerm])
 
 	useEffect(() => {
@@ -128,8 +144,15 @@ const OpenRouterModelPicker: React.FC = () => {
 		}
 	}, [selectedIndex])
 
+	const showBudgetSlider = useMemo(() => {
+		return (
+			selectedModelId?.toLowerCase().includes("claude-3-7-sonnet") ||
+			selectedModelId?.toLowerCase().includes("claude-3.7-sonnet")
+		)
+	}, [selectedModelId])
+
 	return (
-		<>
+		<div style={{ width: "100%" }}>
 			<style>
 				{`
 				.model-item-highlight {
@@ -138,7 +161,7 @@ const OpenRouterModelPicker: React.FC = () => {
 				}
 				`}
 			</style>
-			<div>
+			<div style={{ display: "flex", flexDirection: "column" }}>
 				<label htmlFor="model-search">
 					<span style={{ fontWeight: 500 }}>Model</span>
 				</label>
@@ -153,7 +176,11 @@ const OpenRouterModelPicker: React.FC = () => {
 						}}
 						onFocus={() => setIsDropdownVisible(true)}
 						onKeyDown={handleKeyDown}
-						style={{ width: "100%", zIndex: OPENROUTER_MODEL_PICKER_Z_INDEX, position: "relative" }}>
+						style={{
+							width: "100%",
+							zIndex: OPENROUTER_MODEL_PICKER_Z_INDEX,
+							position: "relative",
+						}}>
 						{searchTerm && (
 							<div
 								className="input-icon-button codicon codicon-close"
@@ -195,12 +222,19 @@ const OpenRouterModelPicker: React.FC = () => {
 			</div>
 
 			{hasInfo ? (
-				<ModelInfoView
-					selectedModelId={selectedModelId}
-					modelInfo={selectedModelInfo}
-					isDescriptionExpanded={isDescriptionExpanded}
-					setIsDescriptionExpanded={setIsDescriptionExpanded}
-				/>
+				<>
+					{showBudgetSlider && (
+						<ThinkingBudgetSlider apiConfiguration={apiConfiguration} setApiConfiguration={setApiConfiguration} />
+					)}
+
+					<ModelInfoView
+						selectedModelId={selectedModelId}
+						modelInfo={selectedModelInfo}
+						isDescriptionExpanded={isDescriptionExpanded}
+						setIsDescriptionExpanded={setIsDescriptionExpanded}
+						isPopup={isPopup}
+					/>
+				</>
 			) : (
 				<p
 					style={{
@@ -208,20 +242,22 @@ const OpenRouterModelPicker: React.FC = () => {
 						marginTop: 0,
 						color: "var(--vscode-descriptionForeground)",
 					}}>
-					The extension automatically fetches the latest list of models available on{" "}
-					<VSCodeLink style={{ display: "inline", fontSize: "inherit" }} href="https://openrouter.ai/models">
-						OpenRouter.
-					</VSCodeLink>
-					If you're unsure which model to choose, Cline works best with{" "}
-					<VSCodeLink
-						style={{ display: "inline", fontSize: "inherit" }}
-						onClick={() => handleModelChange("anthropic/claude-3.5-sonnet:beta")}>
-						anthropic/claude-3.5-sonnet:beta.
-					</VSCodeLink>
-					You can also try searching "free" for no-cost options currently available.
+					<>
+						The extension automatically fetches the latest list of models available on{" "}
+						<VSCodeLink style={{ display: "inline", fontSize: "inherit" }} href="https://openrouter.ai/models">
+							OpenRouter.
+						</VSCodeLink>
+						If you're unsure which model to choose, Cline works best with{" "}
+						<VSCodeLink
+							style={{ display: "inline", fontSize: "inherit" }}
+							onClick={() => handleModelChange("anthropic/claude-3.7-sonnet")}>
+							anthropic/claude-3.7-sonnet.
+						</VSCodeLink>
+						You can also try searching "free" for no-cost options currently available.
+					</>
 				</p>
 			)}
-		</>
+		</div>
 	)
 }
 
@@ -266,8 +302,19 @@ const DropdownItem = styled.div<{ isSelected: boolean }>`
 // Markdown
 
 const StyledMarkdown = styled.div`
-	font-family: var(--vscode-font-family), system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
-		Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+	font-family:
+		var(--vscode-font-family),
+		system-ui,
+		-apple-system,
+		BlinkMacSystemFont,
+		"Segoe UI",
+		Roboto,
+		Oxygen,
+		Ubuntu,
+		Cantarell,
+		"Open Sans",
+		"Helvetica Neue",
+		sans-serif;
 	font-size: 12px;
 	color: var(--vscode-descriptionForeground);
 
@@ -305,11 +352,13 @@ export const ModelDescriptionMarkdown = memo(
 		key,
 		isExpanded,
 		setIsExpanded,
+		isPopup,
 	}: {
 		markdown?: string
 		key: string
 		isExpanded: boolean
 		setIsExpanded: (isExpanded: boolean) => void
+		isPopup?: boolean
 	}) => {
 		const [reactContent, setMarkdown] = useRemark()
 		// const [isExpanded, setIsExpanded] = useState(false)
@@ -369,8 +418,7 @@ export const ModelDescriptionMarkdown = memo(
 								style={{
 									width: 30,
 									height: "1.2em",
-									background:
-										"linear-gradient(to right, transparent, var(--vscode-sideBar-background))",
+									background: "linear-gradient(to right, transparent, var(--vscode-sideBar-background))",
 								}}
 							/>
 							<VSCodeLink
@@ -380,7 +428,7 @@ export const ModelDescriptionMarkdown = memo(
 									fontSize: "inherit",
 									paddingRight: 0,
 									paddingLeft: 3,
-									backgroundColor: "var(--vscode-sideBar-background)",
+									backgroundColor: isPopup ? CODE_BLOCK_BG_COLOR : "var(--vscode-sideBar-background)",
 								}}
 								onClick={() => setIsExpanded(true)}>
 								See more
@@ -403,5 +451,5 @@ export const ModelDescriptionMarkdown = memo(
 			)} */}
 			</StyledMarkdown>
 		)
-	}
+	},
 )

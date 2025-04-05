@@ -1,51 +1,64 @@
 import { VSCodeButton, VSCodeLink } from "@vscode/webview-ui-toolkit/react"
-import { memo } from "react"
-// import VSCodeButtonLink from "./VSCodeButtonLink"
-// import { getOpenRouterAuthUrl } from "./ApiOptions"
-// import { vscode } from "../utils/vscode"
+import { CSSProperties, memo } from "react"
+import { getAsVar, VSC_DESCRIPTION_FOREGROUND, VSC_INACTIVE_SELECTION_BACKGROUND } from "@/utils/vscStyles"
 
 interface AnnouncementProps {
 	version: string
 	hideAnnouncement: () => void
 }
+
+const containerStyle: CSSProperties = {
+	backgroundColor: getAsVar(VSC_INACTIVE_SELECTION_BACKGROUND),
+	borderRadius: "3px",
+	padding: "12px 16px",
+	margin: "5px 15px 5px 15px",
+	position: "relative",
+	flexShrink: 0,
+}
+const closeIconStyle: CSSProperties = { position: "absolute", top: "8px", right: "8px" }
+const h3TitleStyle: CSSProperties = { margin: "0 0 8px" }
+const ulStyle: CSSProperties = { margin: "0 0 8px", paddingLeft: "12px" }
+const accountIconStyle: CSSProperties = { fontSize: 11 }
+const hrStyle: CSSProperties = {
+	height: "1px",
+	background: getAsVar(VSC_DESCRIPTION_FOREGROUND),
+	opacity: 0.1,
+	margin: "8px 0",
+}
+const linkContainerStyle: CSSProperties = { margin: "0" }
+const linkStyle: CSSProperties = { display: "inline" }
+
 /*
 You must update the latestAnnouncementId in ClineProvider for new announcements to show to users. This new id will be compared with whats in state for the 'last announcement shown', and if it's different then the announcement will render. As soon as an announcement is shown, the id will be updated in state. This ensures that announcements are not shown more than once, even if the user doesn't close it themselves.
 */
 const Announcement = ({ version, hideAnnouncement }: AnnouncementProps) => {
 	const minorVersion = version.split(".").slice(0, 2).join(".") // 2.0.0 -> 2.0
 	return (
-		<div
-			style={{
-				backgroundColor: "var(--vscode-editor-inactiveSelectionBackground)",
-				borderRadius: "3px",
-				padding: "12px 16px",
-				margin: "5px 15px 5px 15px",
-				position: "relative",
-				flexShrink: 0,
-			}}>
-			<VSCodeButton
-				appearance="icon"
-				onClick={hideAnnouncement}
-				style={{ position: "absolute", top: "8px", right: "8px" }}>
+		<div style={containerStyle}>
+			<VSCodeButton appearance="icon" onClick={hideAnnouncement} style={closeIconStyle}>
 				<span className="codicon codicon-close"></span>
 			</VSCodeButton>
-			<h3 style={{ margin: "0 0 8px" }}>
+			<h3 style={h3TitleStyle}>
 				🎉{"  "}New in v{minorVersion}
 			</h3>
-			<p style={{ margin: "5px 0px" }}>
-				Cline now uses Anthropic's new{" "}
-				<VSCodeLink
-					href="https://www.anthropic.com/news/3-5-models-and-computer-use"
-					style={{ display: "inline" }}>
-					"Computer Use"
-				</VSCodeLink>{" "}
-				feature to launch a browser, click, type, and scroll. This gives him more autonomy in runtime debugging,
-				end-to-end testing, and even general web use. Try asking "Look up the weather in Colorado" to see it in
-				action, or{" "}
-				<VSCodeLink href="https://x.com/sdrzn/status/1850880547825823989" style={{ display: "inline" }}>
-					see a full demo here.
-				</VSCodeLink>
-			</p>
+			<ul style={ulStyle}>
+				<li>
+					<b>Add to Cline:</b> Right-click selected text in any file or terminal to quickly add context to your current
+					task! Plus, when you see a lightbulb icon, select 'Fix with Cline' to have Cline fix errors in your code.
+				</li>
+				<li>
+					<b>Billing Dashboard:</b> Track your remaining credits and transaction history right in the extension with a{" "}
+					<span className="codicon codicon-account" style={accountIconStyle}></span> Cline account!
+				</li>
+				<li>
+					<b>Faster Inference:</b> Cline/OpenRouter users can sort underlying providers used by throughput, price, and
+					latency. Sorting by throughput will output faster generations (at a higher cost).
+				</li>
+				<li>
+					<b>Enhanced MCP Support:</b> Dynamic image loading with GIF support, and a new delete button to clean up
+					failed servers.
+				</li>
+			</ul>
 			{/*<ul style={{ margin: "0 0 8px", paddingLeft: "12px" }}>
 				 <li>
 					OpenRouter now supports prompt caching! They also have much higher rate limits than other providers,
@@ -78,7 +91,7 @@ const Announcement = ({ version, hideAnnouncement }: AnnouncementProps) => {
 							Switch to OpenRouter
 						</VSCodeButton>
 					)}
-				</li> 
+				</li>
 				<li>
 					<b>Edit Cline's changes before accepting!</b> When he creates or edits a file, you can modify his
 					changes directly in the right side of the diff view (+ hover over the 'Revert Block' arrow button in
@@ -93,10 +106,18 @@ const Announcement = ({ version, hideAnnouncement }: AnnouncementProps) => {
 					environments)
 				</li>
 			</ul>*/}
-			<p style={{ margin: "0" }}>
-				Join
-				<VSCodeLink style={{ display: "inline" }} href="https://discord.gg/cline">
-					discord.gg/cline
+			<div style={hrStyle} />
+			<p style={linkContainerStyle}>
+				Join us on{" "}
+				<VSCodeLink style={linkStyle} href="https://x.com/cline">
+					X,
+				</VSCodeLink>{" "}
+				<VSCodeLink style={linkStyle} href="https://discord.gg/cline">
+					discord,
+				</VSCodeLink>{" "}
+				or{" "}
+				<VSCodeLink style={linkStyle} href="https://www.reddit.com/r/cline/">
+					r/cline
 				</VSCodeLink>
 				for more updates!
 			</p>

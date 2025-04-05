@@ -1,22 +1,22 @@
 import * as vscode from "vscode"
 import * as path from "path"
 import { listFiles } from "../../services/glob/list-files"
-import { ClineProvider } from "../../core/webview/ClineProvider"
+import { Controller } from "../../core/controller"
 
 const cwd = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath).at(0)
 
 // Note: this is not a drop-in replacement for listFiles at the start of tasks, since that will be done for Desktops when there is no workspace selected
 class WorkspaceTracker {
-	private providerRef: WeakRef<ClineProvider>
+	private controllerRef: WeakRef<Controller>
 	private disposables: vscode.Disposable[] = []
 	private filePaths: Set<string> = new Set()
 
-	constructor(provider: ClineProvider) {
-		this.providerRef = new WeakRef(provider)
+	constructor(controller: Controller) {
+		this.controllerRef = new WeakRef(controller)
 		this.registerListeners()
 	}
 
-	async initializeFilePaths() {
+	async populateFilePaths() {
 		// should not auto get filepaths for desktop since it would immediately show permission popup before cline ever creates a file
 		if (!cwd) {
 			return
@@ -52,7 +52,7 @@ class WorkspaceTracker {
 		await Promise.all(
 			event.files.map(async (file) => {
 				await this.addFilePath(file.fsPath)
-			})
+			}),
 		)
 		this.workspaceDidUpdate()
 	}
@@ -64,7 +64,7 @@ class WorkspaceTracker {
 				if (await this.removeFilePath(file.fsPath)) {
 					updated = true
 				}
-			})
+			}),
 		)
 		if (updated) {
 			this.workspaceDidUpdate()
@@ -76,7 +76,7 @@ class WorkspaceTracker {
 			event.files.map(async (file) => {
 				await this.removeFilePath(file.oldUri.fsPath)
 				await this.addFilePath(file.newUri.fsPath)
-			})
+			}),
 		)
 		this.workspaceDidUpdate()
 	}
@@ -85,7 +85,7 @@ class WorkspaceTracker {
 		if (!cwd) {
 			return
 		}
-		this.providerRef.deref()?.postMessageToWebview({
+		this.controllerRef.deref()?.postMessageToWebview({
 			type: "workspaceUpdated",
 			filePaths: Array.from(this.filePaths).map((file) => {
 				const relativePath = path.relative(cwd, file).toPosix()

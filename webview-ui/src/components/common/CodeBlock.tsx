@@ -3,7 +3,7 @@ import { useRemark } from "react-remark"
 import rehypeHighlight, { Options } from "rehype-highlight"
 import styled from "styled-components"
 import { visit } from "unist-util-visit"
-import { useExtensionState } from "../../context/ExtensionStateContext"
+import { useExtensionState } from "@/context/ExtensionStateContext"
 
 export const CODE_BLOCK_BG_COLOR = "var(--vscode-editor-background, --vscode-sideBar-background, rgb(30 30 30))"
 
@@ -69,8 +69,19 @@ const StyledMarkdown = styled.div<{ forceWrap: boolean }>`
 	}
 
 	background-color: ${CODE_BLOCK_BG_COLOR};
-	font-family: var(--vscode-font-family), system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
-		Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+	font-family:
+		var(--vscode-font-family),
+		system-ui,
+		-apple-system,
+		BlinkMacSystemFont,
+		"Segoe UI",
+		Roboto,
+		Oxygen,
+		Ubuntu,
+		Cantarell,
+		"Open Sans",
+		"Helvetica Neue",
+		sans-serif;
 	font-size: var(--vscode-editor-font-size, var(--vscode-font-size, 12px));
 	color: var(--vscode-editor-foreground, #fff);
 
@@ -109,7 +120,7 @@ const CodeBlock = memo(({ source, forceWrap = false }: CodeBlockProps) => {
 						if (!node.lang) {
 							node.lang = "javascript"
 						} else if (node.lang.includes(".")) {
-							// if the langauge is a file, get the extension
+							// if the language is a file, get the extension
 							node.lang = node.lang.split(".").slice(-1)[0]
 						}
 					})

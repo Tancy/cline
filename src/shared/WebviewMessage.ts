@@ -5,73 +5,43 @@ import { ChatSettings } from "./ChatSettings"
 import { UserInfo } from "./UserInfo"
 import { ChatContent } from "./ChatContent"
 import { TelemetrySetting } from "./TelemetrySetting"
+import { McpViewTab } from "./mcp"
 
 export interface WebviewMessage {
 	type:
-		| "addRemoteServer"
 		| "apiConfiguration"
 		| "webviewDidLaunch"
 		| "newTask"
-		| "askResponse"
-		| "clearTask"
+		| "condense"
+		| "reportBug"
 		| "didShowAnnouncement"
-		| "selectImages"
-		| "exportCurrentTask"
-		| "showTaskWithId"
-		| "deleteTaskWithId"
-		| "exportTaskWithId"
-		| "resetState"
-		| "requestOllamaModels"
-		| "requestLmStudioModels"
-		| "openImage"
 		| "openInBrowser"
-		| "openFile"
-		| "openMention"
-		| "cancelTask"
-		| "refreshOpenRouterModels"
-		| "refreshOpenAiModels"
+		| "showChatView"
 		| "openMcpSettings"
-		| "restartMcpServer"
-		| "deleteMcpServer"
 		| "autoApprovalSettings"
-		| "browserSettings"
 		| "togglePlanActMode"
-		| "checkpointDiff"
-		| "checkpointRestore"
-		| "taskCompletionViewChanges"
 		| "openExtensionSettings"
 		| "requestVsCodeLmModels"
-		| "toggleToolAutoApprove"
-		| "toggleMcpServer"
-		| "getLatestState"
-		| "accountLoginClicked"
-		| "accountLogoutClicked"
 		| "showAccountViewClicked"
 		| "authStateChanged"
 		| "authCallback"
 		| "fetchMcpMarketplace"
-		| "downloadMcp"
-		| "silentlyRefreshMcpMarketplace"
 		| "searchCommits"
-		| "showMcpView"
 		| "fetchLatestMcpServersFromHub"
 		| "telemetrySetting"
-		| "openSettings"
-		| "updateMcpTimeout"
-		| "fetchOpenGraphData"
-		| "checkIsImageUrl"
 		| "invoke"
 		| "updateSettings"
 		| "clearAllTaskHistory"
 		| "fetchUserCreditsData"
 		| "optionsResponse"
 		| "requestTotalTasksSize"
-		| "taskFeedback"
 		| "searchFiles"
-	// | "relaunchChromeDebugMode"
+		| "grpc_request"
+		| "grpc_request_cancel"
+		| "toggleWorkflow"
+
 	text?: string
 	disabled?: boolean
-	askResponse?: ClineAskResponse
 	apiConfiguration?: ApiConfiguration
 	images?: string[]
 	bool?: boolean
@@ -82,6 +52,7 @@ export interface WebviewMessage {
 	chatContent?: ChatContent
 	mcpId?: string
 	timeout?: number
+	tab?: McpViewTab
 	// For toggleToolAutoApprove
 	serverName?: string
 	serverUrl?: string
@@ -94,12 +65,33 @@ export interface WebviewMessage {
 	// For openInBrowser
 	url?: string
 	planActSeparateModelsSetting?: boolean
+	enableCheckpointsSetting?: boolean
+	mcpMarketplaceEnabled?: boolean
 	telemetrySetting?: TelemetrySetting
 	customInstructionsSetting?: string
-	// For task feedback
-	feedbackType?: TaskFeedbackType
 	mentionsRequestId?: string
 	query?: string
+	// For toggleFavoriteModel
+	modelId?: string
+	grpc_request?: {
+		service: string
+		method: string
+		message: any // JSON serialized protobuf message
+		request_id: string // For correlating requests and responses
+		is_streaming?: boolean // Whether this is a streaming request
+	}
+	grpc_request_cancel?: {
+		request_id: string // ID of the request to cancel
+	}
+	// For cline rules and workflows
+	isGlobal?: boolean
+	rulePath?: string
+	workflowPath?: string
+	enabled?: boolean
+	filename?: string
+
+	offset?: number
+	shellIntegrationTimeout?: number
 }
 
 export type ClineAskResponse = "yesButtonClicked" | "noButtonClicked" | "messageResponse"

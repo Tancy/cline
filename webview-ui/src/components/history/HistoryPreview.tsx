@@ -1,7 +1,7 @@
+import { StringRequest } from "@shared/proto/cline/common"
 import { VSCodeButton } from "@vscode/webview-ui-toolkit/react"
-import { useExtensionState } from "@/context/ExtensionStateContext"
-import { vscode } from "@/utils/vscode"
 import { memo, useState } from "react"
+import { useExtensionState } from "@/context/ExtensionStateContext"
 import { TaskServiceClient } from "@/services/grpc-client"
 import { formatLargeNumber } from "@/utils/format"
 
@@ -14,7 +14,9 @@ const HistoryPreview = ({ showHistoryView }: HistoryPreviewProps) => {
 	const [isExpanded, setIsExpanded] = useState(true)
 
 	const handleHistorySelect = (id: string) => {
-		TaskServiceClient.showTaskWithId({ value: id }).catch((error) => console.error("Error showing task:", error))
+		TaskServiceClient.showTaskWithId(StringRequest.create({ value: id })).catch((error) =>
+			console.error("Error showing task:", error),
+		)
 	}
 
 	const toggleExpanded = () => {
@@ -104,8 +106,8 @@ const HistoryPreview = ({ showHistoryView }: HistoryPreviewProps) => {
 								.slice(0, 3)
 								.map((item) => (
 									<div
-										key={item.id}
 										className="history-preview-item"
+										key={item.id}
 										onClick={() => handleHistorySelect(item.id)}>
 										<div style={{ padding: "12px" }}>
 											<div style={{ marginBottom: "8px" }}>
@@ -127,13 +129,13 @@ const HistoryPreview = ({ showHistoryView }: HistoryPreviewProps) => {
 														right: "12px",
 														color: "var(--vscode-button-background)",
 													}}>
-													<span className="codicon codicon-star-full" aria-label="Favorited" />
+													<span aria-label="Favorited" className="codicon codicon-star-full" />
 												</div>
 											)}
 
 											<div
-												id={`history-preview-task-${item.id}`}
 												className="history-preview-task"
+												id={`history-preview-task-${item.id}`}
 												style={{
 													fontSize: "var(--vscode-font-size)",
 													color: "var(--vscode-descriptionForeground)",

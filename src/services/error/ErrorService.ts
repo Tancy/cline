@@ -1,96 +1,65 @@
-import * as Sentry from "@sentry/browser"
-import * as vscode from "vscode"
-import { telemetryService } from "@/services/posthog/telemetry/TelemetryService"
-import * as pkg from "../../../package.json"
+import { ClineError } from "./ClineError"
+import { IErrorProvider } from "./providers/IErrorProvider"
 
-let telemetryLevel = vscode.workspace.getConfiguration("telemetry").get<string>("telemetryLevel", "all")
-let isTelemetryEnabled = ["all", "error"].includes(telemetryLevel)
-
-vscode.workspace.onDidChangeConfiguration(() => {
-	telemetryLevel = vscode.workspace.getConfiguration("telemetry").get<string>("telemetryLevel", "all")
-	isTelemetryEnabled = ["all", "error"].includes(telemetryLevel)
-	ErrorService.toggleEnabled(isTelemetryEnabled)
-	if (isTelemetryEnabled) {
-		ErrorService.setLevel(telemetryLevel as "error" | "all")
-	}
-})
-
+/**
+ * ErrorService handles error logging and tracking for the Cline extension
+ * Uses an abstracted error provider to support multiple error tracking backends
+ * Respects user privacy settings and VSCode's global telemetry configuration
+ */
 export class ErrorService {
-	private static serviceEnabled: boolean
-	private static serviceLevel: string
+	private provider: IErrorProvider
 
-	static initialize() {
-		// Initialize sentry
-		Sentry.init({
-			dsn: "https://7936780e3f0f0290fcf8d4a395c249b7@o4509028819664896.ingest.us.sentry.io/4509052955983872",
-			environment: process.env.NODE_ENV,
-			release: `cline@${pkg.version}`,
-			integrations: [Sentry.browserTracingIntegration(), Sentry.replayIntegration()],
-			beforeSend(event) {
-				// TelemetryService keeps track of whether the user has opted in to telemetry/error reporting
-				const isUserManuallyOptedIn = telemetryService.isTelemetryEnabled()
-				if (isUserManuallyOptedIn && ErrorService.isEnabled()) {
-					return event
-				}
-				return null
-			},
-		})
-
-		ErrorService.toggleEnabled(true)
-		ErrorService.setLevel("error")
+	constructor(provider: IErrorProvider) {
+		this.provider = provider
 	}
 
-	static toggleEnabled(state: boolean) {
-		if (state === false) {
-			ErrorService.serviceEnabled = false
-			return
-		}
-		// If we are trying to enable the service, check that we are allowed to.
-		if (isTelemetryEnabled) {
-			ErrorService.serviceEnabled = true
-		}
+	public logException(error: Error | ClineError, properties?: Record<string, unknown>): void {
+		this.provider.logException(error, properties)
+		console.error("[ErrorService] Logging exception", error)
 	}
 
-	static setLevel(level: "error" | "all") {
-		switch (telemetryLevel) {
-			case "error": {
-				if (level === "error") {
-					ErrorService.serviceLevel = level
-				}
-				break
-			}
-			default: {
-				ErrorService.serviceLevel = level
-			}
-		}
+	public logMessage(
+		message: string,
+		level: "error" | "warning" | "log" | "debug" | "info" = "log",
+		properties?: Record<string, unknown>,
+	): void {
+		this.provider.logMessage(message, level, properties)
 	}
 
-	static logException(error: Error): void {
-		// Don't log if telemetry is off
-		const isUserManuallyOptedIn = telemetryService.isTelemetryEnabled()
-		if (!isUserManuallyOptedIn || !ErrorService.isEnabled()) {
-			return
-		}
-		// Log the error to Sentry
-		Sentry.captureException(error)
+	public toClineError(rawError: unknown, modelId?: string, providerId?: string): ClineError {
+		const transformed = ClineError.transform(rawError, modelId, providerId)
+		this.logException(transformed, { modelId, providerId })
+		return transformed
 	}
 
-	static logMessage(message: string, level: "error" | "warning" | "log" | "debug" | "info" = "log"): void {
-		// Don't log if telemetry is off
-		const isUserManuallyOptedIn = telemetryService.isTelemetryEnabled()
-		if (!isUserManuallyOptedIn || !ErrorService.isEnabled()) {
-			return
-		}
-		if (ErrorService.serviceLevel === "error" && level === "error") {
-			// Log the message if allowed
-			Sentry.captureMessage(message, { level })
-			return
-		}
-		// Log the message if allowed
-		Sentry.captureMessage(message, { level })
+	/**
+	 * Check if error logging is currently enabled
+	 * @returns Boolean indicating whether error logging is enabled
+	 */
+	public isEnabled(): boolean {
+		return this.provider.isEnabled()
 	}
 
-	static isEnabled(): boolean {
-		return ErrorService.serviceEnabled
+	/**
+	 * Get current error logging settings
+	 * @returns Current error logging settings
+	 */
+	public getSettings() {
+		return this.provider.getSettings()
+	}
+
+	/**
+	 * Get the error provider instance
+	 * @returns The current error provider
+	 */
+	public getProvider(): IErrorProvider {
+		return this.provider
+	}
+
+	/**
+	 * Clean up resources when the service is disposed
+	 */
+	public async dispose(): Promise<void> {
+		await this.provider.dispose()
 	}
 }

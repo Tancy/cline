@@ -6,15 +6,60 @@
 	"version": "0.2.0",
 	"configurations": [
 		{
-			"name": "Run Extension",
+			"name": "Run Extension (production)",
 			"type": "extensionHost",
 			"request": "launch",
-			"args": ["--extensionDevelopmentPath=${workspaceFolder}", "--disable-workspace-trust", "${workspaceFolder}"],
-			"outFiles": ["${workspaceFolder}/dist/**/*.js"],
+			"args": [
+				"--extensionDevelopmentPath=${workspaceFolder}",
+				"--disable-workspace-trust",
+				"${workspaceFolder}"
+			],
+			"outFiles": [
+				"${workspaceFolder}/dist/**/*.js"
+			],
 			"preLaunchTask": "${defaultBuildTask}",
 			"env": {
 				"IS_DEV": "true",
-				"DEV_WORKSPACE_FOLDER": "${workspaceFolder}"
+				"DEV_WORKSPACE_FOLDER": "${workspaceFolder}",
+				"CLINE_ENVIRONMENT": "production"
+			}
+		},
+		{
+			"name": "Run Extension (staging)",
+			"type": "extensionHost",
+			"request": "launch",
+			"args": [
+				"--extensionDevelopmentPath=${workspaceFolder}",
+				"--disable-workspace-trust",
+				"${workspaceFolder}"
+			],
+			"outFiles": [
+				"${workspaceFolder}/dist/**/*.js"
+			],
+			"preLaunchTask": "${defaultBuildTask}",
+			"env": {
+				"IS_DEV": "true",
+				"DEV_WORKSPACE_FOLDER": "${workspaceFolder}",
+				"CLINE_ENVIRONMENT": "staging"
+			}
+		},
+		{
+			"name": "Run Extension (local)",
+			"type": "extensionHost",
+			"request": "launch",
+			"args": [
+				"--extensionDevelopmentPath=${workspaceFolder}",
+				"--disable-workspace-trust",
+				"${workspaceFolder}"
+			],
+			"outFiles": [
+				"${workspaceFolder}/dist/**/*.js"
+			],
+			"preLaunchTask": "${defaultBuildTask}",
+			"env": {
+				"IS_DEV": "true",
+				"DEV_WORKSPACE_FOLDER": "${workspaceFolder}",
+				"CLINE_ENVIRONMENT": "local"
 			}
 		},
 		{
@@ -23,38 +68,94 @@
 			"request": "launch",
 			"runtimeExecutable": "${execPath}",
 			"args": [
+				"--user-data-dir=${workspaceFolder}/dist/tmp/user",
 				"--profile-temp",
-				"--sync",
-				"off",
+				"--sync=off",
 				"--disable-extensions",
 				"--extensionDevelopmentPath=${workspaceFolder}",
 				"${workspaceFolder}"
 			],
-			"outFiles": ["${workspaceFolder}/dist/**/*.js"],
-			"preLaunchTask": "clean-sandbox",
+			"outFiles": [
+				"${workspaceFolder}/dist/**/*.js"
+			],
+			"preLaunchTask": "clean-tmp-user",
 			"internalConsoleOptions": "openOnSessionStart",
 			"postDebugTask": "stop",
 			"env": {
 				"IS_DEV": "true",
-				"DEV_WORKSPACE_FOLDER": "${workspaceFolder}"
+				"TEMP_PROFILE": "true",
+				"DEV_WORKSPACE_FOLDER": "${workspaceFolder}",
+				"CLINE_ENVIRONMENT": "production"
 			}
 		},
 		{
 			"type": "node",
 			"request": "launch",
-			"name": "Run Standalone Extension",
-			"skipFiles": ["<node_internals>/**"],
+			"name": "Debug Test Standalone Core Api Server (test:sca-server)",
+			"skipFiles": [
+				"<node_internals>/**"
+			],
 			"sourceMaps": true,
-			"resolveSourceMapLocations": ["${workspaceFolder}/**", "!**/node_modules/**"],
-			"cwd": "${workspaceFolder}/dist-standalone",
-			"outFiles": ["${workspaceFolder}/dist-standalone/**/*.js"],
+			"resolveSourceMapLocations": [
+				"${workspaceFolder}/**",
+				"!**/node_modules/**"
+			],
+			"cwd": "${workspaceFolder}",
+			"outFiles": [
+				"${workspaceFolder}/dist/**/*.js",
+				"${workspaceFolder}/dist-standalone/**/*.js"
+			],
 			"preLaunchTask": "compile-standalone",
+			"runtimeExecutable": "npx",
+			"runtimeArgs": [
+				"tsx"
+			],
+			"program": "scripts/test-standalone-core-api-server.ts",
 			"env": {
-				"GRPC_TRACE": "all",
-				"GRPC_VERBOSITY": "DEBUG",
-				"NODE_PATH": "${workspaceFolder}/dist-standalone/node_modules"
+				"PROTOBUS_PORT": "26040",
+				"HOSTBRIDGE_PORT": "26041",
+				"WORKSPACE_DIR": "${workspaceFolder}",
+				"E2E_TEST": "true",
+				"CLINE_ENVIRONMENT": "local"
 			},
-			"program": "standalone.js"
+			"console": "integratedTerminal",
+			"internalConsoleOptions": "neverOpen"
+		},
+		{
+			"type": "node",
+			"request": "launch",
+			"name": "Debug Current Test File",
+			"skipFiles": [
+				"<node_internals>/**"
+			],
+			"sourceMaps": true,
+			"resolveSourceMapLocations": [
+				"${workspaceFolder}/**",
+				"!**/node_modules/**"
+			],
+			"cwd": "${workspaceFolder}",
+			"runtimeExecutable": "npx",
+			"runtimeArgs": [
+				"mocha"
+			],
+			"args": [
+				"--require",
+				"ts-node/register",
+				"--require",
+				"source-map-support/register",
+				"--require",
+				"./src/test/requires.ts",
+				"--exit",
+				"${file}"
+			],
+			"env": {
+				"TS_NODE_PROJECT": "./tsconfig.unit-test.json",
+				"NODE_ENV": "test",
+				"IS_DEV": "true",
+				"CLINE_ENVIRONMENT": "local"
+			},
+			"console": "integratedTerminal",
+			"internalConsoleOptions": "openOnSessionStart"
 		}
 	]
 }

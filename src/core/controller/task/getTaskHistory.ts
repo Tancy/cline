@@ -1,7 +1,6 @@
+import { GetTaskHistoryRequest, TaskHistoryArray } from "@shared/proto/cline/task"
+import { arePathsEqual, getWorkspacePath } from "../../../utils/path"
 import { Controller } from ".."
-import { GetTaskHistoryRequest, TaskHistoryArray } from "../../../shared/proto/task"
-import { getGlobalState } from "../../storage/state"
-import { getWorkspacePath, arePathsEqual } from "../../../utils/path"
 
 /**
  * Gets filtered task history
@@ -14,8 +13,8 @@ export async function getTaskHistory(controller: Controller, request: GetTaskHis
 		const { favoritesOnly, currentWorkspaceOnly, searchQuery, sortBy } = request
 
 		// Get task history from global state
-		const taskHistory = ((await getGlobalState(controller.context, "taskHistory")) as any[]) || []
-		const workspacePath = getWorkspacePath()
+		const taskHistory = controller.stateManager.getGlobalStateKey("taskHistory")
+		const workspacePath = await getWorkspacePath()
 
 		// Apply filters
 		let filteredTasks = taskHistory.filter((item) => {
@@ -106,10 +105,10 @@ export async function getTaskHistory(controller: Controller, request: GetTaskHis
 			cacheReads: item.cacheReads || 0,
 		}))
 
-		return {
+		return TaskHistoryArray.create({
 			tasks,
 			totalCount,
-		}
+		})
 	} catch (error) {
 		console.error("Error in getTaskHistory:", error)
 		throw error

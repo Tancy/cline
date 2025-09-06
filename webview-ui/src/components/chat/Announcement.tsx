@@ -1,7 +1,12 @@
-import { VSCodeButton, VSCodeLink } from "@vscode/webview-ui-toolkit/react"
-import { CSSProperties, memo } from "react"
-import { getAsVar, VSC_DESCRIPTION_FOREGROUND, VSC_INACTIVE_SELECTION_BACKGROUND } from "@/utils/vscStyles"
 import { Accordion, AccordionItem } from "@heroui/react"
+import { EmptyRequest } from "@shared/proto/cline/common"
+import { VSCodeButton, VSCodeLink } from "@vscode/webview-ui-toolkit/react"
+import { CSSProperties, memo, useState } from "react"
+import { useClineAuth } from "@/context/ClineAuthContext"
+import { useExtensionState } from "@/context/ExtensionStateContext"
+import { AccountServiceClient } from "@/services/grpc-client"
+import { getAsVar, VSC_DESCRIPTION_FOREGROUND, VSC_INACTIVE_SELECTION_BACKGROUND } from "@/utils/vscStyles"
+import { useApiConfigurationHandlers } from "../settings/utils/useApiConfigurationHandlers"
 
 interface AnnouncementProps {
 	version: string
@@ -19,7 +24,7 @@ const containerStyle: CSSProperties = {
 const closeIconStyle: CSSProperties = { position: "absolute", top: "8px", right: "8px" }
 const h3TitleStyle: CSSProperties = { margin: "0 0 8px" }
 const ulStyle: CSSProperties = { margin: "0 0 8px", paddingLeft: "12px" }
-const accountIconStyle: CSSProperties = { fontSize: 11 }
+const _accountIconStyle: CSSProperties = { fontSize: 11 }
 const hrStyle: CSSProperties = {
 	height: "1px",
 	background: getAsVar(VSC_DESCRIPTION_FOREGROUND),
@@ -30,78 +35,124 @@ const linkContainerStyle: CSSProperties = { margin: "0" }
 const linkStyle: CSSProperties = { display: "inline" }
 
 /*
-You must update the latestAnnouncementId in ClineProvider for new announcements to show to users. This new id will be compared with what's in state for the 'last announcement shown', and if it's different then the announcement will render. As soon as an announcement is shown, the id will be updated in state. This ensures that announcements are not shown more than once, even if the user doesn't close it themselves.
+Announcements are automatically shown when the major.minor version changes (for ex 3.19.x → 3.20.x or 4.0.x). 
+The latestAnnouncementId is now automatically generated from the extension's package.json version. 
+Patch releases (3.19.1 → 3.19.2) will not trigger new announcements.
 */
 const Announcement = ({ version, hideAnnouncement }: AnnouncementProps) => {
 	const minorVersion = version.split(".").slice(0, 2).join(".") // 2.0.0 -> 2.0
+	const { clineUser } = useClineAuth()
+	const { apiConfiguration, openRouterModels, setShowChatModelSelector } = useExtensionState()
+	const user = apiConfiguration?.clineAccountId ? clineUser : undefined
+	const { handleFieldsChange } = useApiConfigurationHandlers()
+
+	const [didClickGrokCodeButton, setDidClickGrokCodeButton] = useState(false)
+
+	const setGrokCodeFast1 = () => {
+		const modelId = "x-ai/grok-code-fast-1"
+		// set both plan and act modes to use grok-code-fast-1
+		handleFieldsChange({
+			planModeOpenRouterModelId: modelId,
+			actModeOpenRouterModelId: modelId,
+			planModeOpenRouterModelInfo: openRouterModels[modelId],
+			actModeOpenRouterModelInfo: openRouterModels[modelId],
+			planModeApiProvider: "cline",
+			actModeApiProvider: "cline",
+		})
+
+		setTimeout(() => {
+			setDidClickGrokCodeButton(true)
+			setShowChatModelSelector(true)
+		}, 10)
+	}
+
+	const handleShowAccount = () => {
+		AccountServiceClient.accountLoginClicked(EmptyRequest.create()).catch((err) =>
+			console.error("Failed to get login URL:", err),
+		)
+	}
+
 	return (
 		<div style={containerStyle}>
-			<VSCodeButton data-testid="close-button" appearance="icon" onClick={hideAnnouncement} style={closeIconStyle}>
+			<VSCodeButton appearance="icon" data-testid="close-button" onClick={hideAnnouncement} style={closeIconStyle}>
 				<span className="codicon codicon-close"></span>
 			</VSCodeButton>
 			<h3 style={h3TitleStyle}>
 				🎉{"  "}New in v{minorVersion}
 			</h3>
-			<ul style={ulStyle}>
-				<li>
-					<b>Workflows:</b> Create and manage workflow files that can be injected into conversations via slash commands,
-					making it easy to automate repetitive tasks.
-				</li>
-				<li>
-					<b>Collapsible Task List:</b> Hide your recent tasks when sharing your screen to keep your prompts private.
-				</li>
-				<li>
-					<b>Global Endpoint for Vertex AI:</b> Improved availability and reduced rate limiting errors for Vertex AI
-					users.
-				</li>
-				<li>
-					<b>New User Experience:</b> Special components and guidance for new users to help them get started with Cline.
-				</li>
-				<li>
-					<b>UI Improvements:</b> Fixed loading states and improved settings organization for a smoother experience.
-				</li>
-			</ul>
-			<Accordion isCompact className="pl-0">
-				<AccordionItem
-					key="1"
-					aria-label="Previous Updates"
-					title="Previous Updates:"
-					classNames={{
-						trigger: "bg-transparent border-0 pl-0 pb-0 w-fit",
-						title: "font-bold text-[var(--vscode-foreground)]",
-						indicator:
-							"text-[var(--vscode-foreground)] mb-0.5 -rotate-180 data-[open=true]:-rotate-90 rtl:rotate-0 rtl:data-[open=true]:-rotate-90",
-					}}>
-					<ul style={ulStyle}>
-						<li>
-							<b>Task Timeline:</b> See the history of your coding journey with a visual timeline of checkpoints.
-						</li>
-						<li>
-							<b>UX Improvements:</b> Type while Cline works, smarter auto-scrolling, and copy buttons for task
-							headers and messages.
-						</li>
-						<li>
-							<b>Gemini prompt caching:</b> Gemini and Vertex providers now support prompt caching and price
-							tracking.
-						</li>
-						<li>
-							<b>Global Cline Rules:</b> Store multiple rules files in Documents/Cline/Rules to share between
-							projects.
-						</li>
-					</ul>
-				</AccordionItem>
-			</Accordion>
+			<b>Cline is now available in JetBrains IDEs!</b>
+			<div style={{ margin: "0.3rem 0" }} />
+			Cline is now officially available for JetBrains IDEs including IntelliJ IDEA, PyCharm, WebStorm, and more! Experience
+			the same powerful AI coding assistant you love in VSCode, now in your favorite JetBrains environment. Get started at:{" "}
+			<a href="https://plugins.jetbrains.com/plugin/26861-cline">JetBrains Marketplace</a>
+			<div style={{ margin: "12px 0" }} />
+			<b>
+				Plus: Free <code>grok-code-fast-1</code> Until Sept 10th
+			</b>
+			<div style={{ margin: "0.3rem 0" }} />
+			We partnered with xAI to help build this model from the ground up for agentic coding, and so far–community feedback
+			has been incredible. xAI is continuously improving the model's intelligence with more usage, so give it a try today
+			and let us know what you think! Read more about it here:{" "}
+			<a href="https://x.ai/news/grok-code-fast-1">https://x.ai/news/grok-code-fast-1</a>
+			<div style={{ margin: "18px 0" }} />
+			{user ? (
+				!didClickGrokCodeButton ? (
+					<VSCodeButton appearance="primary" onClick={setGrokCodeFast1}>
+						Try grok-code-fast-1
+					</VSCodeButton>
+				) : null
+			) : (
+				<VSCodeButton appearance="secondary" onClick={handleShowAccount}>
+					Sign Up with Cline
+				</VSCodeButton>
+			)}
+			<div style={{ margin: "-8px 0 -3px 0" }}>
+				<Accordion className="pl-0" isCompact>
+					<AccordionItem
+						aria-label="Previous Updates"
+						classNames={{
+							trigger: "bg-transparent border-0 pl-0 pb-0 w-fit",
+							title: "font-bold text-[var(--vscode-foreground)]",
+							indicator:
+								"text-[var(--vscode-foreground)] mb-0.5 -rotate-180 data-[open=true]:-rotate-90 rtl:rotate-0 rtl:data-[open=true]:-rotate-90",
+						}}
+						key="1"
+						title="Previous Updates:">
+						<ul style={ulStyle}>
+							<li>
+								<b>Focus Chain:</b> Keeps cline focused on long-horizon tasks with automatic todo list management,
+								breaking down complex tasks into manageable steps with real-time progress tracking and passive
+								reminders.
+							</li>
+							<li>
+								<b>Auto Compact:</b> Auto summarizes your task and next steps when your conversation approaches
+								the model's context window limit. This significantly helps Cline stay on track for long task
+								sessions!
+							</li>
+							<li>
+								<b>Deep Planning:</b> New <code>/deep-planning</code> slash command transforms Cline into an
+								architect who investigates your codebase, asks clarifying questions, and creates a comprehensive
+								plan before writing any code.
+							</li>
+							<li>
+								<b>1M Context for Claude Sonnet 4:</b> Cline/OpenRouter users get instant access, Anthropic users
+								need Tier 4, and Bedrock users must be on a supported region.
+							</li>
+						</ul>
+					</AccordionItem>
+				</Accordion>
+			</div>
 			<div style={hrStyle} />
 			<p style={linkContainerStyle}>
 				Join us on{" "}
-				<VSCodeLink style={linkStyle} href="https://x.com/cline">
+				<VSCodeLink href="https://x.com/cline" style={linkStyle}>
 					X,
 				</VSCodeLink>{" "}
-				<VSCodeLink style={linkStyle} href="https://discord.gg/cline">
+				<VSCodeLink href="https://discord.gg/cline" style={linkStyle}>
 					discord,
 				</VSCodeLink>{" "}
 				or{" "}
-				<VSCodeLink style={linkStyle} href="https://www.reddit.com/r/cline/">
+				<VSCodeLink href="https://www.reddit.com/r/cline/" style={linkStyle}>
 					r/cline
 				</VSCodeLink>
 				for more updates!

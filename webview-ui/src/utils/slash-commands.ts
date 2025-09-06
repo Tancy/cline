@@ -25,28 +25,64 @@ export const DEFAULT_SLASH_COMMANDS: SlashCommand[] = [
 		description: "Create a Github issue with Cline",
 		section: "default",
 	},
+	{
+		name: "deep-planning",
+		description: "Create a comprehensive implementation plan before coding",
+		section: "default",
+	},
 ]
 
-export function getWorkflowCommands(workflowToggles: Record<string, boolean>): SlashCommand[] {
-	return Object.entries(workflowToggles)
+export function getWorkflowCommands(
+	localWorkflowToggles: Record<string, boolean>,
+	globalWorkflowToggles: Record<string, boolean>,
+): SlashCommand[] {
+	const { workflows: localWorkflows, nameSet: localWorkflowNames } = Object.entries(localWorkflowToggles)
 		.filter(([_, enabled]) => enabled)
-		.map(([filePath, _]) => {
-			// potentially remove the file extension if there is one, but this would then require
-			// that we prevent users from having the same fname with different extensions
+		.reduce(
+			(acc, [filePath, _]) => {
+				const fileName = filePath.replace(/^.*[/\\]/, "")
+
+				// Add to array of workflows
+				acc.workflows.push({
+					name: fileName,
+					section: "custom",
+				} as SlashCommand)
+
+				// Add to set of names
+				acc.nameSet.add(fileName)
+
+				return acc
+			},
+			{ workflows: [] as SlashCommand[], nameSet: new Set<string>() },
+		)
+
+	const globalWorkflows = Object.entries(globalWorkflowToggles)
+		.filter(([_, enabled]) => enabled)
+		.flatMap(([filePath, _]) => {
 			const fileName = filePath.replace(/^.*[/\\]/, "")
 
-			return {
-				name: fileName,
-				section: "custom",
+			// skip if a local workflow with the same name exists
+			if (localWorkflowNames.has(fileName)) {
+				return []
 			}
+
+			return [
+				{
+					name: fileName,
+					section: "custom",
+				},
+			] as SlashCommand[]
 		})
+
+	const workflows = [...localWorkflows, ...globalWorkflows]
+	return workflows
 }
 
 // Regex for detecting slash commands in text
 // currently doesn't allow whitespace inside of the filename
-export const slashCommandRegex = /\/([a-zA-Z0-9_\.-]+)(\s|$)/
+export const slashCommandRegex = /\/([a-zA-Z0-9_.-]+)(\s|$)/
 export const slashCommandRegexGlobal = new RegExp(slashCommandRegex.source, "g")
-export const slashCommandDeleteRegex = /^\s*\/([a-zA-Z0-9_\.-]+)$/
+export const slashCommandDeleteRegex = /^\s*\/([a-zA-Z0-9_.-]+)$/
 
 /**
  * Removes a slash command at the cursor position
@@ -102,8 +138,12 @@ export function shouldShowSlashCommandsMenu(text: string, cursorPosition: number
 /**
  * Gets filtered slash commands that match the current input
  */
-export function getMatchingSlashCommands(query: string, workflowToggles: Record<string, boolean> = {}): SlashCommand[] {
-	const workflowCommands = getWorkflowCommands(workflowToggles)
+export function getMatchingSlashCommands(
+	query: string,
+	localWorkflowToggles: Record<string, boolean> = {},
+	globalWorkflowToggles: Record<string, boolean> = {},
+): SlashCommand[] {
+	const workflowCommands = getWorkflowCommands(localWorkflowToggles, globalWorkflowToggles)
 	const allCommands = [...DEFAULT_SLASH_COMMANDS, ...workflowCommands]
 
 	if (!query) {
@@ -117,15 +157,19 @@ export function getMatchingSlashCommands(query: string, workflowToggles: Record<
 /**
  * Insert a slash command at position or replace partial command
  */
-export function insertSlashCommand(text: string, commandName: string): { newValue: string; commandIndex: number } {
+export function insertSlashCommand(
+	text: string,
+	commandName: string,
+	partialCommandLength: number,
+): { newValue: string; commandIndex: number } {
 	const slashIndex = text.indexOf("/")
 
-	// where the command ends, at the end of entire text or first space
-	const commandEndIndex = text.indexOf(" ", slashIndex)
+	const beforeSlash = text.substring(0, slashIndex + 1)
+	const afterPartialCommand = text.substring(slashIndex + 1 + partialCommandLength)
 
 	// replace the partial command with the full command
 	const newValue =
-		text.substring(0, slashIndex + 1) + commandName + (commandEndIndex > -1 ? text.substring(commandEndIndex) : " ") // add extra space at the end if only slash command
+		beforeSlash + commandName + (afterPartialCommand.startsWith(" ") ? afterPartialCommand : " " + afterPartialCommand)
 
 	return { newValue, commandIndex: slashIndex }
 }
@@ -134,12 +178,16 @@ export function insertSlashCommand(text: string, commandName: string): { newValu
  * Determines the validation state of a slash command
  * Returns partial if we have a partial match against valid commands, or full for full match
  */
-export function validateSlashCommand(command: string, workflowToggles: Record<string, boolean> = {}): "full" | "partial" | null {
+export function validateSlashCommand(
+	command: string,
+	localWorkflowToggles: Record<string, boolean> = {},
+	globalWorkflowToggles: Record<string, boolean> = {},
+): "full" | "partial" | null {
 	if (!command) {
 		return null
 	}
 
-	const workflowCommands = getWorkflowCommands(workflowToggles)
+	const workflowCommands = getWorkflowCommands(localWorkflowToggles, globalWorkflowToggles)
 	const allCommands = [...DEFAULT_SLASH_COMMANDS, ...workflowCommands]
 
 	// case sensitive matching

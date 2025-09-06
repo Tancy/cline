@@ -32,7 +32,7 @@ English | <a href="https://github.com/cline/cline/blob/main/locales/es/README.md
 
 Meet Cline, an AI assistant that can use your **CLI** a**N**d **E**ditor.
 
-Thanks to [Claude 3.7 Sonnet's agentic coding capabilities](https://www.anthropic.com/claude/sonnet), Cline can handle complex software development tasks step-by-step. With tools that let him create & edit files, explore large projects, use the browser, and execute terminal commands (after you grant permission), he can assist you in ways that go beyond code completion or tech support. Cline can even use the Model Context Protocol (MCP) to create new tools and extend his own capabilities. While autonomous AI scripts traditionally run in sandboxed environments, this extension provides a human-in-the-loop GUI to approve every file change and terminal command, providing a safe and accessible way to explore the potential of agentic AI.
+Thanks to [Claude Sonnet's agentic coding capabilities](https://www.anthropic.com/claude/sonnet), Cline can handle complex software development tasks step-by-step. With tools that let him create & edit files, explore large projects, use the browser, and execute terminal commands (after you grant permission), he can assist you in ways that go beyond code completion or tech support. Cline can even use the Model Context Protocol (MCP) to create new tools and extend his own capabilities. While autonomous AI scripts traditionally run in sandboxed environments, this extension provides a human-in-the-loop GUI to approve every file change and terminal command, providing a safe and accessible way to explore the potential of agentic AI.
 
 1. Enter your task and add images to convert mockups into functional apps or fix bugs with screenshots.
 2. Cline starts by analyzing your file structure & source code ASTs, running regex searches, and reading relevant files to get up to speed in existing projects. By carefully managing what information is added to context, Cline can provide valuable assistance even for large, complex projects without overwhelming the context window.
@@ -51,7 +51,7 @@ Thanks to [Claude 3.7 Sonnet's agentic coding capabilities](https://www.anthrop
 
 ### Use any API and Model
 
-Cline supports API providers like OpenRouter, Anthropic, OpenAI, Google Gemini, AWS Bedrock, Azure, and GCP Vertex. You can also configure any OpenAI compatible API, or use a local model through LM Studio/Ollama. If you're using OpenRouter, the extension fetches their latest model list, allowing you to use the newest models as soon as they're available.
+Cline supports API providers like OpenRouter, Anthropic, OpenAI, Google Gemini, AWS Bedrock, Azure, GCP Vertex, Cerebras and Groq. You can also configure any OpenAI compatible API, or use a local model through LM Studio/Ollama. If you're using OpenRouter, the extension fetches their latest model list, allowing you to use the newest models as soon as they're available.
 
 The extension also keeps track of total tokens and API usage cost for the entire task loop and individual requests, keeping you informed of spend every step of the way.
 
@@ -87,7 +87,7 @@ All changes made by Cline are recorded in your file's Timeline, providing an eas
 
 ### Use the Browser
 
-With Claude 3.5 Sonnet's new [Computer Use](https://www.anthropic.com/news/3-5-models-and-computer-use) capability, Cline can launch a browser, click elements, type text, and scroll, capturing screenshots and console logs at each step. This allows for interactive debugging, end-to-end testing, and even general web use! This gives him autonomy to fixing visual bugs and runtime issues without you needing to handhold and copy-pasting error logs yourself.
+With Claude Sonnet's new [Computer Use](https://www.anthropic.com/news/3-5-models-and-computer-use) capability, Cline can launch a browser, click elements, type text, and scroll, capturing screenshots and console logs at each step. This allows for interactive debugging, end-to-end testing, and even general web use! This gives him autonomy to fixing visual bugs and runtime issues without you needing to handhold and copy-pasting error logs yourself.
 
 Try asking Cline to "test the app", and watch as he runs a command like `npm run dev`, launches your locally running dev server in a browser, and performs a series of tests to confirm that everything works. [See a demo here.](https://x.com/sdrzn/status/1850880547825823989)
 
@@ -140,50 +140,6 @@ For example, when working with a local web server, you can use 'Restore Workspac
 ## Contributing
 
 To contribute to the project, start with our [Contributing Guide](CONTRIBUTING.md) to learn the basics. You can also join our [Discord](https://discord.gg/cline) to chat with other contributors in the `#contributors` channel. If you're looking for full-time work, check out our open positions on our [careers page](https://cline.bot/join-us)!
-
-<details>
-<summary>Local Development Instructions</summary>
-
-1. Clone the repository _(Requires [git-lfs](https://git-lfs.com/))_:
-    ```bash
-    git clone https://github.com/cline/cline.git
-    ```
-2. Open the project in VSCode:
-    ```bash
-    code cline
-    ```
-3. Install the necessary dependencies for the extension and webview-gui:
-    ```bash
-    npm run install:all
-    ```
-4. Launch by pressing `F5` (or `Run`->`Start Debugging`) to open a new VSCode window with the extension loaded. (You may need to install the [esbuild problem matchers extension](https://marketplace.visualstudio.com/items?itemName=connor4312.esbuild-problem-matchers) if you run into issues building the project.)
-
-</details>
-
-<details>
-<summary>Creating a Pull Request</summary>
-
-1. Before creating a PR, generate a changeset entry:
-    ```bash
-    npm run changeset
-    ```
-   This will prompt you for:
-   - Type of change (major, minor, patch)
-     - `major` → breaking changes (1.0.0 → 2.0.0)
-     - `minor` → new features (1.0.0 → 1.1.0)
-     - `patch` → bug fixes (1.0.0 → 1.0.1)
-   - Description of your changes
-
-2. Commit your changes and the generated `.changeset` file
-
-3. Push your branch and create a PR on GitHub. Our CI will:
-   - Run tests and checks
-   - Changesetbot will create a comment showing the version impact
-   - When merged to main, changesetbot will create a Version Packages PR
-   - When the Version Packages PR is merged, a new release will be published
-
-</details>
-
 
 ## License
 

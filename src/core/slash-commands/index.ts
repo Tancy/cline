@@ -1,6 +1,13 @@
-import { newTaskToolResponse, condenseToolResponse, newRuleToolResponse, reportBugToolResponse } from "../prompts/commands"
 import { ClineRulesToggles } from "@shared/cline-rules"
 import fs from "fs/promises"
+import { telemetryService } from "@/services/telemetry"
+import {
+	condenseToolResponse,
+	deepPlanningToolResponse,
+	newRuleToolResponse,
+	newTaskToolResponse,
+	reportBugToolResponse,
+} from "../prompts/commands"
 
 /**
  * Processes text for slash commands and transforms them with appropriate instructions
@@ -8,24 +15,28 @@ import fs from "fs/promises"
  */
 export async function parseSlashCommands(
 	text: string,
-	workflowToggles: ClineRulesToggles,
+	localWorkflowToggles: ClineRulesToggles,
+	globalWorkflowToggles: ClineRulesToggles,
+	ulid: string,
+	focusChainSettings?: { enabled: boolean },
 ): Promise<{ processedText: string; needsClinerulesFileCheck: boolean }> {
-	const SUPPORTED_DEFAULT_COMMANDS = ["newtask", "smol", "compact", "newrule", "reportbug"]
+	const SUPPORTED_DEFAULT_COMMANDS = ["newtask", "smol", "compact", "newrule", "reportbug", "deep-planning"]
 
 	const commandReplacements: Record<string, string> = {
 		newtask: newTaskToolResponse(),
-		smol: condenseToolResponse(),
-		compact: condenseToolResponse(),
+		smol: condenseToolResponse(focusChainSettings),
+		compact: condenseToolResponse(focusChainSettings),
 		newrule: newRuleToolResponse(),
 		reportbug: reportBugToolResponse(),
+		"deep-planning": deepPlanningToolResponse(focusChainSettings),
 	}
 
 	// this currently allows matching prepended whitespace prior to /slash-command
 	const tagPatterns = [
-		{ tag: "task", regex: /<task>(\s*\/([a-zA-Z0-9_\.-]+))(\s+.+?)?\s*<\/task>/is },
-		{ tag: "feedback", regex: /<feedback>(\s*\/([a-zA-Z0-9_\.-]+))(\s+.+?)?\s*<\/feedback>/is },
-		{ tag: "answer", regex: /<answer>(\s*\/([a-zA-Z0-9_\.-]+))(\s+.+?)?\s*<\/answer>/is },
-		{ tag: "user_message", regex: /<user_message>(\s*\/([a-zA-Z0-9_\.-]+))(\s+.+?)?\s*<\/user_message>/is },
+		{ tag: "task", regex: /<task>(\s*\/([a-zA-Z0-9_.-]+))(\s+.+?)?\s*<\/task>/is },
+		{ tag: "feedback", regex: /<feedback>(\s*\/([a-zA-Z0-9_.-]+))(\s+.+?)?\s*<\/feedback>/is },
+		{ tag: "answer", regex: /<answer>(\s*\/([a-zA-Z0-9_.-]+))(\s+.+?)?\s*<\/answer>/is },
+		{ tag: "user_message", regex: /<user_message>(\s*\/([a-zA-Z0-9_.-]+))(\s+.+?)?\s*<\/user_message>/is },
 	]
 
 	// if we find a valid match, we will return inside that block
@@ -55,20 +66,34 @@ export async function parseSlashCommands(
 				const textWithoutSlashCommand = text.substring(0, slashCommandStartIndex) + text.substring(slashCommandEndIndex)
 				const processedText = commandReplacements[commandName] + textWithoutSlashCommand
 
-				return { processedText: processedText, needsClinerulesFileCheck: commandName === "newrule" ? true : false }
+				// Track telemetry for builtin slash command usage
+				telemetryService.captureSlashCommandUsed(ulid, commandName, "builtin")
+
+				return { processedText: processedText, needsClinerulesFileCheck: commandName === "newrule" }
 			}
 
-			// in practice we want to minimize this work, so we only do it if theres a possible match
-			const enabledWorkflows = Object.entries(workflowToggles)
+			const globalWorkflows = Object.entries(globalWorkflowToggles)
 				.filter(([_, enabled]) => enabled)
 				.map(([filePath, _]) => {
 					const fileName = filePath.replace(/^.*[/\\]/, "")
-
 					return {
 						fullPath: filePath,
 						fileName: fileName,
 					}
 				})
+
+			const localWorkflows = Object.entries(localWorkflowToggles)
+				.filter(([_, enabled]) => enabled)
+				.map(([filePath, _]) => {
+					const fileName = filePath.replace(/^.*[/\\]/, "")
+					return {
+						fullPath: filePath,
+						fileName: fileName,
+					}
+				})
+
+			// local workflows have precedence over global workflows
+			const enabledWorkflows = [...localWorkflows, ...globalWorkflows]
 
 			// Then check if the command matches any enabled workflow filename
 			const matchingWorkflow = enabledWorkflows.find((workflow) => workflow.fileName === commandName)
@@ -93,6 +118,9 @@ export async function parseSlashCommands(
 					const processedText =
 						`<explicit_instructions type="${matchingWorkflow.fileName}">\n${workflowContent}\n</explicit_instructions>\n` +
 						textWithoutSlashCommand
+
+					// Track telemetry for workflow command usage
+					telemetryService.captureSlashCommandUsed(ulid, commandName, "workflow")
 
 					return { processedText, needsClinerulesFileCheck: false }
 				} catch (error) {

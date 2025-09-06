@@ -1,4 +1,4 @@
-import path from "path"
+import { workspaceResolver } from "@core/workspace"
 import getFolderSize from "get-folder-size"
 
 /**
@@ -7,8 +7,15 @@ import getFolderSize from "get-folder-size"
  * @returns The total size in bytes, or null if calculation fails
  */
 export async function getTotalTasksSize(storagePath: string): Promise<number | null> {
-	const tasksDir = path.join(storagePath, "tasks")
-	const checkpointsDir = path.join(storagePath, "checkpoints")
+	const tasksDirResult = workspaceResolver.resolveWorkspacePath(storagePath, "tasks", "Utils.storage.getTotalTasksSize")
+	const checkpointsDirResult = workspaceResolver.resolveWorkspacePath(
+		storagePath,
+		"checkpoints",
+		"Utils.storage.getTotalTasksSize",
+	)
+
+	const tasksDir = typeof tasksDirResult === "string" ? tasksDirResult : tasksDirResult.absolutePath
+	const checkpointsDir = typeof checkpointsDirResult === "string" ? checkpointsDirResult : checkpointsDirResult.absolutePath
 
 	try {
 		const tasksSize = await getFolderSize.loose(tasksDir)

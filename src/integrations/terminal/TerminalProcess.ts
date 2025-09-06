@@ -1,7 +1,8 @@
+import { TerminalOutputFailureReason, telemetryService } from "@services/telemetry"
 import { EventEmitter } from "events"
-import { stripAnsi } from "./ansiUtils"
 import * as vscode from "vscode"
-import { Logger } from "@services/logging/Logger"
+import { stripAnsi } from "./ansiUtils"
+import { getLatestTerminalOutput } from "./get-latest-output"
 
 export interface TerminalProcessEvents {
 	line: [line: string]
@@ -24,53 +25,30 @@ export class TerminalProcess extends EventEmitter<TerminalProcessEvents> {
 	isHot: boolean = false
 	private hotTimer: NodeJS.Timeout | null = null
 
-	// constructor() {
-	// 	super()
-
 	async run(terminal: vscode.Terminal, command: string) {
+		// When command does not produce any output, we can assume the shell integration API failed and as a fallback return the current terminal contents
+		const returnCurrentTerminalContents = async () => {
+			try {
+				const terminalSnapshot = await getLatestTerminalOutput()
+				if (terminalSnapshot && terminalSnapshot.trim()) {
+					const fallbackMessage = `The command's output could not be captured due to some technical issue, however it has been executed successfully. Here's the current terminal's content to help you get the command's output:\n\n${terminalSnapshot}`
+					this.emit("line", fallbackMessage)
+				}
+			} catch (error) {
+				console.error("Error capturing terminal output:", error)
+			}
+		}
+
 		if (terminal.shellIntegration && terminal.shellIntegration.executeCommand) {
+			// Track that we're using shell integration
 			const execution = terminal.shellIntegration.executeCommand(command)
 			const stream = execution.read()
 			// todo: need to handle errors
 			let isFirstChunk = true
 			let didOutputNonCommand = false
 			let didEmitEmptyLine = false
-			let firstChunkTimeout: NodeJS.Timeout
-
-			const isWindows = process.platform === "win32"
-			const timeoutMs = isWindows ? 5000 : 500
-
-			const onTimeout = () => {
-				// In rare cases (e.g. running the same command twice like `npm run build`),
-				// the shell integration stream enters a broken state where no data is ever emitted.
-				// We never even get the first chunk, which bricks the UI and locks the user out.
-				// Interestingly, the stream still gets created, and future commands (like `ls`) will work,
-				// suggesting the stream itself isn't one-shot—but certain shell states break its behavior.
-				// To recover, we add a timeout waiting for the first chunk.
-				// If it doesn’t arrive in time, we assume the terminal is broken, dispose it,
-				// and emit an error so the user can safely retry in a clean terminal.
-
-				Logger.debug(
-					`[TerminalProcess.run] First chunk timeout hit — terminal likely in bad state. Terminating terminal.`,
-				)
-				try {
-					terminal.dispose()
-				} catch (err) {
-					Logger.debug(`[TerminalProcess.run] Failed to dispose terminal: ${String(err)}`)
-				}
-				this.emit(
-					"error",
-					new Error("The command ran successfully, but we couldn't capture its output. Please proceed accordingly."),
-				)
-				this.emit("completed")
-				this.emit("continue")
-			}
-
-			firstChunkTimeout = setTimeout(onTimeout, timeoutMs)
 
 			for await (let data of stream) {
-				clearTimeout(firstChunkTimeout)
-
 				// 1. Process chunk and remove artifacts
 				if (isFirstChunk) {
 					/*
@@ -196,6 +174,7 @@ export class TerminalProcess extends EventEmitter<TerminalProcessEvents> {
 				)
 
 				// For non-immediately returning commands we want to show loading spinner right away but this wouldn't happen until it emits a line break, so as soon as we get any output we emit "" to let webview know to show spinner
+				// This is only done for the sake of unblocking the UI, in case there may be some time before the command emits a full line
 				if (!didEmitEmptyLine && !this.fullOutput && data) {
 					this.emit("line", "") // empty line to indicate start of command output stream
 					didEmitEmptyLine = true
@@ -210,7 +189,25 @@ export class TerminalProcess extends EventEmitter<TerminalProcessEvents> {
 
 			this.emitRemainingBufferIfListening()
 
+			// the command process is finished, let's check the output to see if we need to use the terminal capture fallback
+			if (!this.fullOutput.trim()) {
+				// No output captured via shell integration, trying fallback
+				telemetryService.captureTerminalOutputFailure(TerminalOutputFailureReason.TIMEOUT)
+				await returnCurrentTerminalContents()
+				// Check if fallback worked
+				const terminalSnapshot = await getLatestTerminalOutput()
+				if (terminalSnapshot && terminalSnapshot.trim()) {
+					telemetryService.captureTerminalExecution(true, "clipboard")
+				} else {
+					telemetryService.captureTerminalExecution(false, "none")
+				}
+			} else {
+				// Shell integration worked
+				telemetryService.captureTerminalExecution(true, "shell_integration")
+			}
+
 			// for now we don't want this delaying requests since we don't send diagnostics automatically anymore (previous: "even though the command is finished, we still want to consider it 'hot' in case so that api request stalls to let diagnostics catch up")
+			// to explain this further, before we would send workspace diagnostics automatically with each request, but now we only send new diagnostics after file edits, so there's no need to wait for a bit after commands run to let diagnostics catch up
 			if (this.hotTimer) {
 				clearTimeout(this.hotTimer)
 			}
@@ -219,7 +216,22 @@ export class TerminalProcess extends EventEmitter<TerminalProcessEvents> {
 			this.emit("completed")
 			this.emit("continue")
 		} else {
+			// no shell integration detected, we'll fallback to running the command and capturing the terminal's output after some time
+			telemetryService.captureTerminalOutputFailure(TerminalOutputFailureReason.NO_SHELL_INTEGRATION)
 			terminal.sendText(command, true)
+
+			// wait 3 seconds for the command to run
+			await new Promise((resolve) => setTimeout(resolve, 3000))
+
+			// For terminals without shell integration, also try to capture terminal content
+			await returnCurrentTerminalContents()
+			// Check if clipboard fallback worked
+			const terminalSnapshot = await getLatestTerminalOutput()
+			if (terminalSnapshot && terminalSnapshot.trim()) {
+				telemetryService.captureTerminalExecution(true, "clipboard")
+			} else {
+				telemetryService.captureTerminalExecution(false, "none")
+			}
 			// For terminals without shell integration, we can't know when the command completes
 			// So we'll just emit the continue event after a delay
 			this.emit("completed")
@@ -237,7 +249,7 @@ export class TerminalProcess extends EventEmitter<TerminalProcessEvents> {
 		this.buffer += chunk
 		let lineEndIndex: number
 		while ((lineEndIndex = this.buffer.indexOf("\n")) !== -1) {
-			let line = this.buffer.slice(0, lineEndIndex).trimEnd() // removes trailing \r
+			const line = this.buffer.slice(0, lineEndIndex).trimEnd() // removes trailing \r
 			// Remove \r if present (for Windows-style line endings)
 			// if (line.endsWith("\r")) {
 			// 	line = line.slice(0, -1)

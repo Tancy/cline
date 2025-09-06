@@ -1,55 +1,37 @@
 import { Anthropic } from "@anthropic-ai/sdk"
+import { buildApiHandler } from "@core/api"
+import { cleanupLegacyCheckpoints } from "@integrations/checkpoints/CheckpointMigration"
+import { downloadTask } from "@integrations/misc/export-markdown"
+import { ClineAccountService } from "@services/account/ClineAccountService"
+import { McpHub } from "@services/mcp/McpHub"
+import { ApiProvider, ModelInfo } from "@shared/api"
+import { ChatContent } from "@shared/ChatContent"
+import { ExtensionState, Platform } from "@shared/ExtensionMessage"
+import { HistoryItem } from "@shared/HistoryItem"
+import { McpMarketplaceCatalog } from "@shared/mcp"
+import { Mode } from "@shared/storage/types"
+import { TelemetrySetting } from "@shared/TelemetrySetting"
+import { UserInfo } from "@shared/UserInfo"
+import { fileExistsAtPath } from "@utils/fs"
 import axios from "axios"
-
 import fs from "fs/promises"
-import { setTimeout as setTimeoutPromise } from "node:timers/promises"
 import pWaitFor from "p-wait-for"
 import * as path from "path"
 import * as vscode from "vscode"
-import { handleGrpcRequest, handleGrpcRequestCancel } from "./grpc-handler"
-import { handleModelsServiceRequest } from "./models"
-import { EmptyRequest } from "@shared/proto/common"
-import { buildApiHandler } from "@api/index"
-import { cleanupLegacyCheckpoints } from "@integrations/checkpoints/CheckpointMigration"
-import { downloadTask } from "@integrations/misc/export-markdown"
-import { fetchOpenGraphData } from "@integrations/misc/link-preview"
-import { handleFileServiceRequest } from "./file"
-import { getTheme } from "@integrations/theme/getTheme"
-import WorkspaceTracker from "@integrations/workspace/WorkspaceTracker"
-import { ClineAccountService } from "@services/account/ClineAccountService"
-import { BrowserSession } from "@services/browser/BrowserSession"
-import { McpHub } from "@services/mcp/McpHub"
-import { telemetryService } from "@/services/posthog/telemetry/TelemetryService"
-import { ApiProvider, ModelInfo } from "@shared/api"
-import { ChatContent } from "@shared/ChatContent"
-import { ChatSettings } from "@shared/ChatSettings"
-import { ExtensionMessage, ExtensionState, Invoke, Platform } from "@shared/ExtensionMessage"
-import { HistoryItem } from "@shared/HistoryItem"
-import { McpDownloadResponse, McpMarketplaceCatalog, McpServer } from "@shared/mcp"
-import { TelemetrySetting } from "@shared/TelemetrySetting"
-import { WebviewMessage } from "@shared/WebviewMessage"
-import { fileExistsAtPath } from "@utils/fs"
-import { getWorkingState } from "@utils/git"
-import { extractCommitMessage } from "@integrations/git/commit-message-generator"
-import { getTotalTasksSize } from "@utils/storage"
+import { clineEnvConfig } from "@/config"
+import { HostProvider } from "@/hosts/host-provider"
+import { AuthService } from "@/services/auth/AuthService"
+import { getDistinctId } from "@/services/logging/distinctId"
+import { telemetryService } from "@/services/telemetry"
+import { ShowMessageType } from "@/shared/proto/host/window"
+import { getLatestAnnouncementId } from "@/utils/announcements"
+import { getCwd, getDesktopDir } from "@/utils/path"
+import { PromptRegistry } from "../prompts/system-prompt"
 import { ensureMcpServersDirectoryExists, ensureSettingsDirectoryExists, GlobalFileNames } from "../storage/disk"
-import {
-	getAllExtensionState,
-	getGlobalState,
-	getSecret,
-	getWorkspaceState,
-	resetExtensionState,
-	storeSecret,
-	updateApiConfiguration,
-	updateGlobalState,
-	updateWorkspaceState,
-} from "../storage/state"
-import { Task, cwd } from "../task"
-import { ClineRulesToggles } from "@shared/cline-rules"
+import { PersistenceErrorEvent, StateManager } from "../storage/StateManager"
+import { Task } from "../task"
+import { sendMcpMarketplaceCatalogEvent } from "./mcp/subscribeToMcpMarketplaceCatalog"
 import { sendStateUpdate } from "./state/subscribeToState"
-import { refreshClineRulesToggles } from "@core/context/instructions/user-instructions/cline-rules"
-import { refreshExternalRulesToggles } from "@core/context/instructions/user-instructions/external-rules"
-import { refreshWorkflowToggles } from "@core/context/instructions/user-instructions/workflows"
 
 /*
 https://github.com/microsoft/vscode-webview-ui-toolkit-samples/blob/main/default/weather-webview/src/providers/WeatherViewProvider.ts
@@ -58,42 +40,77 @@ https://github.com/KumarVariable/vscode-extension-sidebar-html/blob/master/src/c
 */
 
 export class Controller {
-	private postMessage: (message: ExtensionMessage) => Thenable<boolean> | undefined
-
+	readonly id: string
 	private disposables: vscode.Disposable[] = []
 	task?: Task
-	workspaceTracker: WorkspaceTracker
+
 	mcpHub: McpHub
 	accountService: ClineAccountService
-	private latestAnnouncementId = "may-16-2025_16:11:00" // update to some unique identifier when we add a new announcement
+	authService: AuthService
+	readonly stateManager: StateManager
 
 	constructor(
 		readonly context: vscode.ExtensionContext,
-		private readonly outputChannel: vscode.OutputChannel,
-		postMessage: (message: ExtensionMessage) => Thenable<boolean> | undefined,
+		id: string,
 	) {
-		this.outputChannel.appendLine("ClineProvider instantiated")
-		this.postMessage = postMessage
+		this.id = id
+		PromptRegistry.getInstance() // Ensure prompts and tools are registered
+		HostProvider.get().logToChannel("ClineProvider instantiated")
+		this.accountService = ClineAccountService.getInstance()
+		this.stateManager = new StateManager(context)
+		this.authService = AuthService.getInstance(this)
 
-		this.workspaceTracker = new WorkspaceTracker((msg) => this.postMessageToWebview(msg))
+		// Initialize cache service asynchronously - critical for extension functionality
+		this.stateManager
+			.initialize()
+			.then(() => {
+				this.authService.restoreRefreshTokenAndRetrieveAuthInfo()
+			})
+			.catch((error) => {
+				console.error(
+					"[Controller] CRITICAL: Failed to initialize StateManager - extension may not function properly:",
+					error,
+				)
+			})
+
+		// Set up persistence error recovery
+		this.stateManager.onPersistenceError = async ({ error }: PersistenceErrorEvent) => {
+			console.error("[Controller] Cache persistence failed, recovering:", error)
+			try {
+				await this.stateManager.reInitialize()
+				await this.postStateToWebview()
+				HostProvider.window.showMessage({
+					type: ShowMessageType.WARNING,
+					message: "Saving settings to storage failed.",
+				})
+			} catch (recoveryError) {
+				console.error("[Controller] Cache recovery failed:", recoveryError)
+				HostProvider.window.showMessage({
+					type: ShowMessageType.ERROR,
+					message: "Failed to save settings. Please restart the extension.",
+				})
+			}
+		}
+
+		this.stateManager.onSyncExternalChange = async () => {
+			await this.postStateToWebview()
+		}
+
 		this.mcpHub = new McpHub(
 			() => ensureMcpServersDirectoryExists(),
 			() => ensureSettingsDirectoryExists(this.context),
-			(msg) => this.postMessageToWebview(msg),
 			this.context.extension?.packageJSON?.version ?? "1.0.0",
-		)
-		this.accountService = new ClineAccountService(
-			(msg) => this.postMessageToWebview(msg),
-			async () => {
-				const { apiConfiguration } = await this.getStateToPostToWebview()
-				return apiConfiguration?.clineApiKey
-			},
+			telemetryService,
 		)
 
 		// Clean up legacy checkpoints
-		cleanupLegacyCheckpoints(this.context.globalStorageUri.fsPath, this.outputChannel).catch((error) => {
+		cleanupLegacyCheckpoints(this.context.globalStorageUri.fsPath).catch((error) => {
 			console.error("Failed to cleanup legacy checkpoints:", error)
 		})
+	}
+
+	async getCurrentMode(): Promise<Mode> {
+		return this.stateManager.getGlobalStateKey("mode")
 	}
 
 	/*
@@ -102,18 +119,14 @@ export class Controller {
 	- https://github.com/microsoft/vscode-extension-samples/blob/main/webview-sample/src/extension.ts
 	*/
 	async dispose() {
-		this.outputChannel.appendLine("Disposing ClineProvider...")
 		await this.clearTask()
-		this.outputChannel.appendLine("Cleared task")
 		while (this.disposables.length) {
 			const x = this.disposables.pop()
 			if (x) {
 				x.dispose()
 			}
 		}
-		this.workspaceTracker.dispose()
 		this.mcpHub.dispose()
-		this.outputChannel.appendLine("Disposed all disposables")
 
 		console.error("Controller disposed")
 	}
@@ -121,39 +134,62 @@ export class Controller {
 	// Auth methods
 	async handleSignOut() {
 		try {
-			await storeSecret(this.context, "clineApiKey", undefined)
-			await updateGlobalState(this.context, "userInfo", undefined)
-			await updateGlobalState(this.context, "apiProvider", "openrouter")
+			// TODO: update to clineAccountId and then move clineApiKey to a clear function.
+			this.stateManager.setSecret("clineAccountId", undefined)
+			this.stateManager.setGlobalState("userInfo", undefined)
+
+			// Update API providers through cache service
+			const apiConfiguration = this.stateManager.getApiConfiguration()
+			const updatedConfig = {
+				...apiConfiguration,
+				planModeApiProvider: "openrouter" as ApiProvider,
+				actModeApiProvider: "openrouter" as ApiProvider,
+			}
+			this.stateManager.setApiConfiguration(updatedConfig)
+
 			await this.postStateToWebview()
-			vscode.window.showInformationMessage("Successfully logged out of Cline")
-		} catch (error) {
-			vscode.window.showErrorMessage("Logout failed")
+			HostProvider.window.showMessage({
+				type: ShowMessageType.INFORMATION,
+				message: "Successfully logged out of Cline",
+			})
+		} catch (_error) {
+			HostProvider.window.showMessage({
+				type: ShowMessageType.INFORMATION,
+				message: "Logout failed",
+			})
 		}
 	}
 
-	async setUserInfo(info?: { displayName: string | null; email: string | null; photoURL: string | null }) {
-		await updateGlobalState(this.context, "userInfo", info)
+	async setUserInfo(info?: UserInfo) {
+		this.stateManager.setGlobalState("userInfo", info)
 	}
 
-	async initTask(task?: string, images?: string[], historyItem?: HistoryItem) {
+	async initTask(task?: string, images?: string[], files?: string[], historyItem?: HistoryItem) {
 		await this.clearTask() // ensures that an existing task doesn't exist before starting a new one, although this shouldn't be possible since user must clear task before starting a new one
-		const {
-			apiConfiguration,
-			customInstructions,
-			autoApprovalSettings,
-			browserSettings,
-			chatSettings,
-			shellIntegrationTimeout,
-			enableCheckpointsSetting,
-			isNewUser,
-			taskHistory,
-		} = await getAllExtensionState(this.context)
+
+		const apiConfiguration = this.stateManager.getApiConfiguration()
+		const autoApprovalSettings = this.stateManager.getGlobalStateKey("autoApprovalSettings")
+		const browserSettings = this.stateManager.getGlobalStateKey("browserSettings")
+		const focusChainSettings = this.stateManager.getGlobalStateKey("focusChainSettings")
+		const focusChainFeatureFlagEnabled = this.stateManager.getGlobalStateKey("focusChainFeatureFlagEnabled")
+		const preferredLanguage = this.stateManager.getGlobalStateKey("preferredLanguage")
+		const openaiReasoningEffort = this.stateManager.getGlobalStateKey("openaiReasoningEffort")
+		const mode = this.stateManager.getGlobalStateKey("mode")
+		const shellIntegrationTimeout = this.stateManager.getGlobalStateKey("shellIntegrationTimeout")
+		const terminalReuseEnabled = this.stateManager.getGlobalStateKey("terminalReuseEnabled")
+		const terminalOutputLineLimit = this.stateManager.getGlobalStateKey("terminalOutputLineLimit")
+		const defaultTerminalProfile = this.stateManager.getGlobalStateKey("defaultTerminalProfile")
+		const enableCheckpointsSetting = this.stateManager.getGlobalStateKey("enableCheckpointsSetting")
+		const isNewUser = this.stateManager.getGlobalStateKey("isNewUser")
+		const taskHistory = this.stateManager.getGlobalStateKey("taskHistory")
+		const strictPlanModeEnabled = this.stateManager.getGlobalStateKey("strictPlanModeEnabled")
+		const useAutoCondense = this.stateManager.getGlobalStateKey("useAutoCondense")
 
 		const NEW_USER_TASK_COUNT_THRESHOLD = 10
 
 		// Check if the user has completed enough tasks to no longer be considered a "new user"
 		if (isNewUser && !historyItem && taskHistory && taskHistory.length >= NEW_USER_TASK_COUNT_THRESHOLD) {
-			await updateGlobalState(this.context, "isNewUser", false)
+			this.stateManager.setGlobalState("isNewUser", false)
 			await this.postStateToWebview()
 		}
 
@@ -162,26 +198,49 @@ export class Controller {
 				...autoApprovalSettings,
 				version: (autoApprovalSettings.version ?? 1) + 1,
 			}
-			await updateGlobalState(this.context, "autoApprovalSettings", updatedAutoApprovalSettings)
+			this.stateManager.setGlobalState("autoApprovalSettings", updatedAutoApprovalSettings)
 		}
+		// Apply remote feature flag gate to focus chain settings. Respect if user has disabled it.
+		let focusChainEnabled: boolean
+		if (focusChainSettings?.enabled === false) {
+			focusChainEnabled = false
+		} else if (focusChainFeatureFlagEnabled === false) {
+			focusChainEnabled = false
+		} else {
+			focusChainEnabled = Boolean(focusChainSettings?.enabled)
+		}
+
+		const effectiveFocusChainSettings = {
+			...(focusChainSettings || { enabled: true, remindClineInterval: 6 }),
+			enabled: focusChainEnabled,
+		}
+
 		this.task = new Task(
-			this.context,
+			this,
 			this.mcpHub,
-			this.workspaceTracker,
 			(historyItem) => this.updateTaskHistory(historyItem),
 			() => this.postStateToWebview(),
-			(message) => this.postMessageToWebview(message),
 			(taskId) => this.reinitExistingTaskFromId(taskId),
 			() => this.cancelTask(),
 			apiConfiguration,
 			autoApprovalSettings,
 			browserSettings,
-			chatSettings,
+			effectiveFocusChainSettings,
+			preferredLanguage,
+			openaiReasoningEffort,
+			mode,
+			strictPlanModeEnabled ?? true,
+			useAutoCondense ?? false,
 			shellIntegrationTimeout,
+			terminalReuseEnabled ?? true,
+			terminalOutputLineLimit ?? 500,
+			defaultTerminalProfile ?? "default",
 			enableCheckpointsSetting ?? true,
-			customInstructions,
+			await getCwd(getDesktopDir()),
+			this.stateManager,
 			task,
 			images,
+			files,
 			historyItem,
 		)
 	}
@@ -189,492 +248,54 @@ export class Controller {
 	async reinitExistingTaskFromId(taskId: string) {
 		const history = await this.getTaskWithId(taskId)
 		if (history) {
-			await this.initTask(undefined, undefined, history.historyItem)
-		}
-	}
-
-	// Send any JSON serializable data to the react app
-	async postMessageToWebview(message: ExtensionMessage) {
-		await this.postMessage(message)
-	}
-
-	/**
-	 * Sets up an event listener to listen for messages passed from the webview context and
-	 * executes code based on the message that is received.
-	 *
-	 * @param webview A reference to the extension webview
-	 */
-	async handleWebviewMessage(message: WebviewMessage) {
-		switch (message.type) {
-			case "authStateChanged":
-				await this.setUserInfo(message.user || undefined)
-				await this.postStateToWebview()
-				break
-			case "webviewDidLaunch":
-				this.postStateToWebview()
-				this.workspaceTracker?.populateFilePaths() // don't await
-				getTheme().then((theme) =>
-					this.postMessageToWebview({
-						type: "theme",
-						text: JSON.stringify(theme),
-					}),
-				)
-				// post last cached models in case the call to endpoint fails
-				this.readOpenRouterModels().then((openRouterModels) => {
-					if (openRouterModels) {
-						this.postMessageToWebview({
-							type: "openRouterModels",
-							openRouterModels,
-						})
-					}
-				})
-				// gui relies on model info to be up-to-date to provide the most accurate pricing, so we need to fetch the latest details on launch.
-				// we do this for all users since many users switch between api providers and if they were to switch back to openrouter it would be showing outdated model info if we hadn't retrieved the latest at this point
-				// (see normalizeApiConfiguration > openrouter)
-				// Prefetch marketplace and OpenRouter models
-
-				getGlobalState(this.context, "mcpMarketplaceCatalog").then((mcpMarketplaceCatalog) => {
-					if (mcpMarketplaceCatalog) {
-						this.postMessageToWebview({
-							type: "mcpMarketplaceCatalog",
-							mcpMarketplaceCatalog: mcpMarketplaceCatalog as McpMarketplaceCatalog,
-						})
-					}
-				})
-				this.silentlyRefreshMcpMarketplace()
-				handleModelsServiceRequest(this, "refreshOpenRouterModels", EmptyRequest.create()).then(async (response) => {
-					if (response && response.models) {
-						// update model info in state (this needs to be done here since we don't want to update state while settings is open, and we may refresh models there)
-						const { apiConfiguration } = await getAllExtensionState(this.context)
-						if (apiConfiguration.openRouterModelId && response.models[apiConfiguration.openRouterModelId]) {
-							await updateGlobalState(
-								this.context,
-								"openRouterModelInfo",
-								response.models[apiConfiguration.openRouterModelId],
-							)
-							await this.postStateToWebview()
-						}
-					}
-				})
-
-				// If user already opted in to telemetry, enable telemetry service
-				this.getStateToPostToWebview().then((state) => {
-					const { telemetrySetting } = state
-					const isOptedIn = telemetrySetting !== "disabled"
-					telemetryService.updateTelemetryState(isOptedIn)
-				})
-				break
-			case "showChatView": {
-				this.postMessageToWebview({
-					type: "action",
-					action: "chatButtonClicked",
-				})
-				break
-			}
-			case "newTask":
-				// Code that should run in response to the hello message command
-				//vscode.window.showInformationMessage(message.text!)
-
-				// Send a message to our webview.
-				// You can send any JSON serializable data.
-				// Could also do this in extension .ts
-				//this.postMessageToWebview({ type: "text", text: `Extension: ${Date.now()}` })
-				// initializing new instance of Cline will make sure that any agentically running promises in old instance don't affect our new task. this essentially creates a fresh slate for the new task
-				await this.initTask(message.text, message.images)
-				break
-			case "apiConfiguration":
-				if (message.apiConfiguration) {
-					await updateApiConfiguration(this.context, message.apiConfiguration)
-					if (this.task) {
-						this.task.api = buildApiHandler(message.apiConfiguration)
-					}
-				}
-				await this.postStateToWebview()
-				break
-			case "autoApprovalSettings":
-				if (message.autoApprovalSettings) {
-					const currentSettings = (await getAllExtensionState(this.context)).autoApprovalSettings
-					const incomingVersion = message.autoApprovalSettings.version ?? 1
-					const currentVersion = currentSettings?.version ?? 1
-					if (incomingVersion > currentVersion) {
-						await updateGlobalState(this.context, "autoApprovalSettings", message.autoApprovalSettings)
-						if (this.task) {
-							this.task.autoApprovalSettings = message.autoApprovalSettings
-						}
-						await this.postStateToWebview()
-					}
-				}
-				break
-			case "togglePlanActMode":
-				if (message.chatSettings) {
-					await this.togglePlanActModeWithChatSettings(message.chatSettings, message.chatContent)
-				}
-				break
-			case "optionsResponse":
-				await this.postMessageToWebview({
-					type: "invoke",
-					invoke: "sendMessage",
-					text: message.text,
-				})
-				break
-			case "didShowAnnouncement":
-				await updateGlobalState(this.context, "lastShownAnnouncementId", this.latestAnnouncementId)
-				await this.postStateToWebview()
-				break
-			case "openInBrowser":
-				if (message.url) {
-					vscode.env.openExternal(vscode.Uri.parse(message.url))
-				}
-				break
-			case "showAccountViewClicked": {
-				await this.postMessageToWebview({ type: "action", action: "accountButtonClicked" })
-				break
-			}
-			case "fetchUserCreditsData": {
-				await this.fetchUserCreditsData()
-				break
-			}
-			case "openMcpSettings": {
-				const mcpSettingsFilePath = await this.mcpHub?.getMcpSettingsFilePath()
-				if (mcpSettingsFilePath) {
-					await handleFileServiceRequest(this, "openFile", { value: mcpSettingsFilePath })
-				}
-				break
-			}
-			case "fetchMcpMarketplace": {
-				await this.fetchMcpMarketplace(message.bool)
-				break
-			}
-			// case "openMcpMarketplaceServerDetails": {
-			// 	if (message.text) {
-			// 		const response = await fetch(`https://api.cline.bot/v1/mcp/marketplace/item?mcpId=${message.mcpId}`)
-			// 		const details: McpDownloadResponse = await response.json()
-
-			// 		if (details.readmeContent) {
-			// 			// Disable markdown preview markers
-			// 			const config = vscode.workspace.getConfiguration("markdown")
-			// 			await config.update("preview.markEditorSelection", false, true)
-
-			// 			// Create URI with base64 encoded markdown content
-			// 			const uri = vscode.Uri.parse(
-			// 				`${DIFF_VIEW_URI_SCHEME}:${details.name} README?${Buffer.from(details.readmeContent).toString("base64")}`,
-			// 			)
-
-			// 			// close existing
-			// 			const tabs = vscode.window.tabGroups.all
-			// 				.flatMap((tg) => tg.tabs)
-			// 				.filter((tab) => tab.label && tab.label.includes("README") && tab.label.includes("Preview"))
-			// 			for (const tab of tabs) {
-			// 				await vscode.window.tabGroups.close(tab)
-			// 			}
-
-			// 			// Show only the preview
-			// 			await vscode.commands.executeCommand("markdown.showPreview", uri, {
-			// 				sideBySide: true,
-			// 				preserveFocus: true,
-			// 			})
-			// 		}
-			// 	}
-
-			// 	this.postMessageToWebview({ type: "relinquishControl" })
-
-			// 	break
-			// }
-			case "toggleWorkflow": {
-				const { workflowPath, enabled } = message
-				if (workflowPath && typeof enabled === "boolean") {
-					const toggles = ((await getWorkspaceState(this.context, "workflowToggles")) as ClineRulesToggles) || {}
-					toggles[workflowPath] = enabled
-					await updateWorkspaceState(this.context, "workflowToggles", toggles)
-					await this.postStateToWebview()
-				}
-				break
-			}
-			case "requestTotalTasksSize": {
-				this.refreshTotalTasksSize()
-				break
-			}
-
-			case "fetchLatestMcpServersFromHub": {
-				this.mcpHub?.sendLatestMcpServers()
-				break
-			}
-			case "openExtensionSettings": {
-				const settingsFilter = message.text || ""
-				await vscode.commands.executeCommand(
-					"workbench.action.openSettings",
-					`@ext:saoudrizwan.claude-dev ${settingsFilter}`.trim(), // trim whitespace if no settings filter
-				)
-				break
-			}
-			case "invoke": {
-				if (message.text) {
-					await this.postMessageToWebview({
-						type: "invoke",
-						invoke: message.text as Invoke,
-					})
-				}
-				break
-			}
-			// telemetry
-			case "telemetrySetting": {
-				if (message.telemetrySetting) {
-					await this.updateTelemetrySetting(message.telemetrySetting)
-				}
-				await this.postStateToWebview()
-				break
-			}
-			case "updateSettings": {
-				// api config
-				if (message.apiConfiguration) {
-					await updateApiConfiguration(this.context, message.apiConfiguration)
-					if (this.task) {
-						this.task.api = buildApiHandler(message.apiConfiguration)
-					}
-				}
-
-				// custom instructions
-				await this.updateCustomInstructions(message.customInstructionsSetting)
-
-				// telemetry setting
-				if (message.telemetrySetting) {
-					await this.updateTelemetrySetting(message.telemetrySetting)
-				}
-
-				// plan act setting
-				await updateGlobalState(this.context, "planActSeparateModelsSetting", message.planActSeparateModelsSetting)
-
-				if (typeof message.enableCheckpointsSetting === "boolean") {
-					await updateGlobalState(this.context, "enableCheckpointsSetting", message.enableCheckpointsSetting)
-				}
-
-				if (typeof message.mcpMarketplaceEnabled === "boolean") {
-					await updateGlobalState(this.context, "mcpMarketplaceEnabled", message.mcpMarketplaceEnabled)
-				}
-
-				// chat settings (including preferredLanguage and openAIReasoningEffort)
-				if (message.chatSettings) {
-					await updateGlobalState(this.context, "chatSettings", message.chatSettings)
-					if (this.task) {
-						this.task.chatSettings = message.chatSettings
-					}
-				}
-
-				// after settings are updated, post state to webview
-				await this.postStateToWebview()
-
-				await this.postMessageToWebview({ type: "didUpdateSettings" })
-				break
-			}
-			case "clearAllTaskHistory": {
-				const answer = await vscode.window.showWarningMessage(
-					"What would you like to delete?",
-					{ modal: true },
-					"Delete All Except Favorites",
-					"Delete Everything",
-					"Cancel",
-				)
-
-				if (answer === "Delete All Except Favorites") {
-					await this.deleteNonFavoriteTaskHistory()
-					await this.postStateToWebview()
-					this.refreshTotalTasksSize()
-				} else if (answer === "Delete Everything") {
-					await this.deleteAllTaskHistory()
-					await this.postStateToWebview()
-					this.refreshTotalTasksSize()
-				}
-				this.postMessageToWebview({ type: "relinquishControl" })
-				break
-			}
-			case "grpc_request": {
-				if (message.grpc_request) {
-					await handleGrpcRequest(this, message.grpc_request)
-				}
-				break
-			}
-			case "grpc_request_cancel": {
-				if (message.grpc_request_cancel) {
-					await handleGrpcRequestCancel(this, message.grpc_request_cancel)
-				}
-				break
-			}
-
-			// Add more switch case statements here as more webview message commands
-			// are created within the webview context (i.e. inside media/main.js)
+			await this.initTask(undefined, undefined, undefined, history.historyItem)
 		}
 	}
 
 	async updateTelemetrySetting(telemetrySetting: TelemetrySetting) {
-		await updateGlobalState(this.context, "telemetrySetting", telemetrySetting)
+		this.stateManager.setGlobalState("telemetrySetting", telemetrySetting)
 		const isOptedIn = telemetrySetting !== "disabled"
 		telemetryService.updateTelemetryState(isOptedIn)
+		await this.postStateToWebview()
 	}
 
-	async togglePlanActModeWithChatSettings(chatSettings: ChatSettings, chatContent?: ChatContent) {
-		const didSwitchToActMode = chatSettings.mode === "act"
+	async togglePlanActMode(modeToSwitchTo: Mode, chatContent?: ChatContent): Promise<boolean> {
+		const didSwitchToActMode = modeToSwitchTo === "act"
+
+		// Store mode to global state
+		this.stateManager.setGlobalState("mode", modeToSwitchTo)
 
 		// Capture mode switch telemetry | Capture regardless of if we know the taskId
-		telemetryService.captureModeSwitch(this.task?.taskId ?? "0", chatSettings.mode)
+		telemetryService.captureModeSwitch(this.task?.ulid ?? "0", modeToSwitchTo)
 
-		// Get previous model info that we will revert to after saving current mode api info
-		const {
-			apiConfiguration,
-			previousModeApiProvider: newApiProvider,
-			previousModeModelId: newModelId,
-			previousModeModelInfo: newModelInfo,
-			previousModeVsCodeLmModelSelector: newVsCodeLmModelSelector,
-			previousModeThinkingBudgetTokens: newThinkingBudgetTokens,
-			previousModeReasoningEffort: newReasoningEffort,
-			previousModeAwsBedrockCustomSelected: newAwsBedrockCustomSelected,
-			previousModeAwsBedrockCustomModelBaseId: newAwsBedrockCustomModelBaseId,
-			planActSeparateModelsSetting,
-		} = await getAllExtensionState(this.context)
-
-		const shouldSwitchModel = planActSeparateModelsSetting === true
-
-		if (shouldSwitchModel) {
-			// Save the last model used in this mode
-			await updateGlobalState(this.context, "previousModeApiProvider", apiConfiguration.apiProvider)
-			await updateGlobalState(this.context, "previousModeThinkingBudgetTokens", apiConfiguration.thinkingBudgetTokens)
-			await updateGlobalState(this.context, "previousModeReasoningEffort", apiConfiguration.reasoningEffort)
-			switch (apiConfiguration.apiProvider) {
-				case "anthropic":
-				case "vertex":
-				case "gemini":
-				case "asksage":
-				case "openai-native":
-				case "qwen":
-				case "deepseek":
-				case "xai":
-					await updateGlobalState(this.context, "previousModeModelId", apiConfiguration.apiModelId)
-					break
-				case "bedrock":
-					await updateGlobalState(this.context, "previousModeModelId", apiConfiguration.apiModelId)
-					await updateGlobalState(
-						this.context,
-						"previousModeAwsBedrockCustomSelected",
-						apiConfiguration.awsBedrockCustomSelected,
-					)
-					await updateGlobalState(
-						this.context,
-						"previousModeAwsBedrockCustomModelBaseId",
-						apiConfiguration.awsBedrockCustomModelBaseId,
-					)
-					break
-				case "openrouter":
-				case "cline":
-					await updateGlobalState(this.context, "previousModeModelId", apiConfiguration.openRouterModelId)
-					await updateGlobalState(this.context, "previousModeModelInfo", apiConfiguration.openRouterModelInfo)
-					break
-				case "vscode-lm":
-					// Important we don't set modelId to this, as it's an object not string (webview expects model id to be a string)
-					await updateGlobalState(
-						this.context,
-						"previousModeVsCodeLmModelSelector",
-						apiConfiguration.vsCodeLmModelSelector,
-					)
-					break
-				case "openai":
-					await updateGlobalState(this.context, "previousModeModelId", apiConfiguration.openAiModelId)
-					await updateGlobalState(this.context, "previousModeModelInfo", apiConfiguration.openAiModelInfo)
-					break
-				case "ollama":
-					await updateGlobalState(this.context, "previousModeModelId", apiConfiguration.ollamaModelId)
-					break
-				case "lmstudio":
-					await updateGlobalState(this.context, "previousModeModelId", apiConfiguration.lmStudioModelId)
-					break
-				case "litellm":
-					await updateGlobalState(this.context, "previousModeModelId", apiConfiguration.liteLlmModelId)
-					await updateGlobalState(this.context, "previousModeModelInfo", apiConfiguration.liteLlmModelInfo)
-					break
-				case "requesty":
-					await updateGlobalState(this.context, "previousModeModelId", apiConfiguration.requestyModelId)
-					await updateGlobalState(this.context, "previousModeModelInfo", apiConfiguration.requestyModelInfo)
-					break
-			}
-
-			// Restore the model used in previous mode
-			if (
-				newApiProvider ||
-				newModelId ||
-				newThinkingBudgetTokens !== undefined ||
-				newReasoningEffort ||
-				newVsCodeLmModelSelector
-			) {
-				await updateGlobalState(this.context, "apiProvider", newApiProvider)
-				await updateGlobalState(this.context, "thinkingBudgetTokens", newThinkingBudgetTokens)
-				await updateGlobalState(this.context, "reasoningEffort", newReasoningEffort)
-				switch (newApiProvider) {
-					case "anthropic":
-					case "vertex":
-					case "gemini":
-					case "asksage":
-					case "openai-native":
-					case "qwen":
-					case "deepseek":
-					case "xai":
-						await updateGlobalState(this.context, "apiModelId", newModelId)
-						break
-					case "bedrock":
-						await updateGlobalState(this.context, "apiModelId", newModelId)
-						await updateGlobalState(this.context, "awsBedrockCustomSelected", newAwsBedrockCustomSelected)
-						await updateGlobalState(this.context, "awsBedrockCustomModelBaseId", newAwsBedrockCustomModelBaseId)
-						break
-					case "openrouter":
-					case "cline":
-						await updateGlobalState(this.context, "openRouterModelId", newModelId)
-						await updateGlobalState(this.context, "openRouterModelInfo", newModelInfo)
-						break
-					case "vscode-lm":
-						await updateGlobalState(this.context, "vsCodeLmModelSelector", newVsCodeLmModelSelector)
-						break
-					case "openai":
-						await updateGlobalState(this.context, "openAiModelId", newModelId)
-						await updateGlobalState(this.context, "openAiModelInfo", newModelInfo)
-						break
-					case "ollama":
-						await updateGlobalState(this.context, "ollamaModelId", newModelId)
-						break
-					case "lmstudio":
-						await updateGlobalState(this.context, "lmStudioModelId", newModelId)
-						break
-					case "litellm":
-						await updateGlobalState(this.context, "previousModeModelId", apiConfiguration.liteLlmModelId)
-						await updateGlobalState(this.context, "previousModeModelInfo", apiConfiguration.liteLlmModelInfo)
-						break
-					case "requesty":
-						await updateGlobalState(this.context, "requestyModelId", newModelId)
-						await updateGlobalState(this.context, "requestyModelInfo", newModelInfo)
-						break
-				}
-
-				if (this.task) {
-					const { apiConfiguration: updatedApiConfiguration } = await getAllExtensionState(this.context)
-					this.task.api = buildApiHandler(updatedApiConfiguration)
-				}
-			}
+		// Update API handler with new mode (buildApiHandler now selects provider based on mode)
+		if (this.task) {
+			const apiConfiguration = this.stateManager.getApiConfiguration()
+			this.task.api = buildApiHandler({ ...apiConfiguration, ulid: this.task.ulid }, modeToSwitchTo)
 		}
 
-		await updateGlobalState(this.context, "chatSettings", chatSettings)
 		await this.postStateToWebview()
 
 		if (this.task) {
-			this.task.chatSettings = chatSettings
-			if (this.task.isAwaitingPlanResponse && didSwitchToActMode) {
-				this.task.didRespondToPlanAskBySwitchingMode = true
+			this.task.updateMode(modeToSwitchTo)
+			if (this.task.taskState.isAwaitingPlanResponse && didSwitchToActMode) {
+				this.task.taskState.didRespondToPlanAskBySwitchingMode = true
 				// Use chatContent if provided, otherwise use default message
-				await this.postMessageToWebview({
-					type: "invoke",
-					invoke: "sendMessage",
-					text: chatContent?.message || "PLAN_MODE_TOGGLE_RESPONSE",
-					images: chatContent?.images,
-				})
+				await this.task.handleWebviewAskResponse(
+					"messageResponse",
+					chatContent?.message || "PLAN_MODE_TOGGLE_RESPONSE",
+					chatContent?.images || [],
+					chatContent?.files || [],
+				)
+
+				return true
 			} else {
 				this.cancelTask()
+				return false
 			}
 		}
+
+		return false
 	}
 
 	async cancelTask() {
@@ -688,9 +309,9 @@ export class Controller {
 			await pWaitFor(
 				() =>
 					this.task === undefined ||
-					this.task.isStreaming === false ||
-					this.task.didFinishAbortingStream ||
-					this.task.isWaitingForFirstChunk, // if only first chunk is processed, then there's no need to wait for graceful abort (closes edits, browser, etc)
+					this.task.taskState.isStreaming === false ||
+					this.task.taskState.didFinishAbortingStream ||
+					this.task.taskState.isWaitingForFirstChunk, // if only first chunk is processed, then there's no need to wait for graceful abort (closes edits, browser, etc)
 				{
 					timeout: 3_000,
 				},
@@ -699,87 +320,69 @@ export class Controller {
 			})
 			if (this.task) {
 				// 'abandoned' will prevent this cline instance from affecting future cline instance gui. this may happen if its hanging on a streaming request
-				this.task.abandoned = true
+				this.task.taskState.abandoned = true
 			}
-			await this.initTask(undefined, undefined, historyItem) // clears task again, so we need to abortTask manually above
-			// await this.postStateToWebview() // new Cline instance will post state when it's ready. having this here sent an empty messages array to webview leading to virtuoso having to reload the entire list
+			await this.initTask(undefined, undefined, undefined, historyItem) // clears task again, so we need to abortTask manually above
+			// Dont send the state to the webview, the new Cline instance will send state when it's ready.
+			// Sending the state here sent an empty messages array to webview leading to virtuoso having to reload the entire list
 		}
 	}
 
-	async updateCustomInstructions(instructions?: string) {
-		// User may be clearing the field
-		await updateGlobalState(this.context, "customInstructions", instructions || undefined)
-		if (this.task) {
-			this.task.customInstructions = instructions || undefined
-		}
-	}
-
-	// Account
-
-	async fetchUserCreditsData() {
+	async handleAuthCallback(customToken: string, provider: string | null = null) {
 		try {
-			await Promise.all([
-				this.accountService?.fetchBalance(),
-				this.accountService?.fetchUsageTransactions(),
-				this.accountService?.fetchPaymentTransactions(),
-			])
-		} catch (error) {
-			console.error("Failed to fetch user credits data:", error)
-		}
-	}
-
-	// Auth
-
-	public async validateAuthState(state: string | null): Promise<boolean> {
-		const storedNonce = await getSecret(this.context, "authNonce")
-		if (!state || state !== storedNonce) {
-			return false
-		}
-		await storeSecret(this.context, "authNonce", undefined) // Clear after use
-		return true
-	}
-
-	async handleAuthCallback(customToken: string, apiKey: string) {
-		try {
-			// Store API key for API calls
-			await storeSecret(this.context, "clineApiKey", apiKey)
-
-			// Send custom token to webview for Firebase auth
-			await this.postMessageToWebview({
-				type: "authCallback",
-				customToken,
-			})
+			await this.authService.handleAuthCallback(customToken, provider ? provider : "google")
 
 			const clineProvider: ApiProvider = "cline"
-			await updateGlobalState(this.context, "apiProvider", clineProvider)
 
-			// Update API configuration with the new provider and API key
-			const { apiConfiguration } = await getAllExtensionState(this.context)
-			const updatedConfig = {
-				...apiConfiguration,
-				apiProvider: clineProvider,
-				clineApiKey: apiKey,
+			// Get current settings to determine how to update providers
+			const planActSeparateModelsSetting = this.stateManager.getGlobalStateKey("planActSeparateModelsSetting")
+
+			const currentMode = await this.getCurrentMode()
+
+			// Get current API configuration from cache
+			const currentApiConfiguration = this.stateManager.getApiConfiguration()
+
+			const updatedConfig = { ...currentApiConfiguration }
+
+			if (planActSeparateModelsSetting) {
+				// Only update the current mode's provider
+				if (currentMode === "plan") {
+					updatedConfig.planModeApiProvider = clineProvider
+				} else {
+					updatedConfig.actModeApiProvider = clineProvider
+				}
+			} else {
+				// Update both modes to keep them in sync
+				updatedConfig.planModeApiProvider = clineProvider
+				updatedConfig.actModeApiProvider = clineProvider
 			}
 
+			// Update the API configuration through cache service
+			this.stateManager.setApiConfiguration(updatedConfig)
+
+			// Mark welcome view as completed since user has successfully logged in
+			this.stateManager.setGlobalState("welcomeViewCompleted", true)
+
 			if (this.task) {
-				this.task.api = buildApiHandler(updatedConfig)
+				this.task.api = buildApiHandler({ ...updatedConfig, ulid: this.task.ulid }, currentMode)
 			}
 
 			await this.postStateToWebview()
-			// vscode.window.showInformationMessage("Successfully logged in to Cline")
 		} catch (error) {
 			console.error("Failed to handle auth callback:", error)
-			vscode.window.showErrorMessage("Failed to log in to Cline")
+			HostProvider.window.showMessage({
+				type: ShowMessageType.ERROR,
+				message: "Failed to log in to Cline",
+			})
 			// Even on login failure, we preserve any existing tokens
 			// Only clear tokens on explicit logout
 		}
 	}
 
 	// MCP Marketplace
-
 	private async fetchMcpMarketplaceFromApi(silent: boolean = false): Promise<McpMarketplaceCatalog | undefined> {
 		try {
-			const response = await axios.get("https://api.cline.bot/v1/mcp/marketplace", {
+			const response = await axios.get(`${clineEnvConfig.mcpBaseUrl}/marketplace`, {
 				headers: {
 					"Content-Type": "application/json",
 				},
@@ -799,17 +402,16 @@ export class Controller {
 			}
 
 			// Store in global state
-			await updateGlobalState(this.context, "mcpMarketplaceCatalog", catalog)
+			this.stateManager.setGlobalState("mcpMarketplaceCatalog", catalog)
 			return catalog
 		} catch (error) {
 			console.error("Failed to fetch MCP marketplace:", error)
 			if (!silent) {
 				const errorMessage = error instanceof Error ? error.message : "Failed to fetch MCP marketplace"
-				await this.postMessageToWebview({
-					type: "mcpMarketplaceCatalog",
-					error: errorMessage,
+				HostProvider.window.showMessage({
+					type: ShowMessageType.ERROR,
+					message: errorMessage,
 				})
-				vscode.window.showErrorMessage(errorMessage)
 			}
 			return undefined
 		}
@@ -817,9 +419,10 @@ export class Controller {
 
 	private async fetchMcpMarketplaceFromApiRPC(silent: boolean = false): Promise<McpMarketplaceCatalog | undefined> {
 		try {
-			const response = await axios.get("https://api.cline.bot/v1/mcp/marketplace", {
+			const response = await axios.get(`${clineEnvConfig.mcpBaseUrl}/marketplace`, {
 				headers: {
 					"Content-Type": "application/json",
+					"User-Agent": "cline-vscode-extension",
 				},
 			})
 
@@ -837,7 +440,7 @@ export class Controller {
 			}
 
 			// Store in global state
-			await updateGlobalState(this.context, "mcpMarketplaceCatalog", catalog)
+			this.stateManager.setGlobalState("mcpMarketplaceCatalog", catalog)
 			return catalog
 		} catch (error) {
 			console.error("Failed to fetch MCP marketplace:", error)
@@ -853,10 +456,7 @@ export class Controller {
 		try {
 			const catalog = await this.fetchMcpMarketplaceFromApi(true)
 			if (catalog) {
-				await this.postMessageToWebview({
-					type: "mcpMarketplaceCatalog",
-					mcpMarketplaceCatalog: catalog,
-				})
+				await sendMcpMarketplaceCatalogEvent(catalog)
 			}
 		} catch (error) {
 			console.error("Failed to silently refresh MCP marketplace:", error)
@@ -865,7 +465,7 @@ export class Controller {
 
 	/**
 	 * RPC variant that silently refreshes the MCP marketplace catalog and returns the result
-	 * Unlike silentlyRefreshMcpMarketplace, this doesn't post a message to the webview
+	 * Unlike silentlyRefreshMcpMarketplace, this doesn't send a message to the webview
 	 * @returns MCP marketplace catalog or undefined if refresh failed
 	 */
 	async silentlyRefreshMcpMarketplaceRPC() {
@@ -874,38 +474,6 @@ export class Controller {
 		} catch (error) {
 			console.error("Failed to silently refresh MCP marketplace (RPC):", error)
 			return undefined
-		}
-	}
-
-	private async fetchMcpMarketplace(forceRefresh: boolean = false) {
-		try {
-			// Check if we have cached data
-			const cachedCatalog = (await getGlobalState(this.context, "mcpMarketplaceCatalog")) as
-				| McpMarketplaceCatalog
-				| undefined
-			if (!forceRefresh && cachedCatalog?.items) {
-				await this.postMessageToWebview({
-					type: "mcpMarketplaceCatalog",
-					mcpMarketplaceCatalog: cachedCatalog,
-				})
-				return
-			}
-
-			const catalog = await this.fetchMcpMarketplaceFromApi(false)
-			if (catalog) {
-				await this.postMessageToWebview({
-					type: "mcpMarketplaceCatalog",
-					mcpMarketplaceCatalog: catalog,
-				})
-			}
-		} catch (error) {
-			console.error("Failed to handle cached MCP marketplace:", error)
-			const errorMessage = error instanceof Error ? error.message : "Failed to handle cached MCP marketplace"
-			await this.postMessageToWebview({
-				type: "mcpMarketplaceCatalog",
-				error: errorMessage,
-			})
-			vscode.window.showErrorMessage(errorMessage)
 		}
 	}
 
@@ -926,16 +494,23 @@ export class Controller {
 		}
 
 		const openrouter: ApiProvider = "openrouter"
-		await updateGlobalState(this.context, "apiProvider", openrouter)
-		await storeSecret(this.context, "openRouterApiKey", apiKey)
+		const currentMode = await this.getCurrentMode()
+
+		// Update API configuration through cache service
+		const currentApiConfiguration = this.stateManager.getApiConfiguration()
+		const updatedConfig = {
+			...currentApiConfiguration,
+			planModeApiProvider: openrouter,
+			actModeApiProvider: openrouter,
+			openRouterApiKey: apiKey,
+		}
+		this.stateManager.setApiConfiguration(updatedConfig)
+
 		await this.postStateToWebview()
 		if (this.task) {
-			this.task.api = buildApiHandler({
-				apiProvider: openrouter,
-				openRouterApiKey: apiKey,
-			})
+			this.task.api = buildApiHandler({ ...updatedConfig, ulid: this.task.ulid }, currentMode)
 		}
-		// await this.postMessageToWebview({ type: "action", action: "settingsButtonClicked" }) // bad ux if user is on welcome
+		// Dont send settingsButtonClicked because its bad ux if user is on welcome
 	}
 
 	private async ensureCacheDirectoryExists(): Promise<string> {
@@ -955,100 +530,18 @@ export class Controller {
 		return undefined
 	}
 
-	// Context menus and code actions
-
-	getFileMentionFromPath(filePath: string) {
-		const cwd = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath).at(0)
-		if (!cwd) {
-			return "@/" + filePath
+	// Read Vercel AI Gateway models from disk cache
+	async readVercelAiGatewayModels(): Promise<Record<string, ModelInfo> | undefined> {
+		const vercelAiGatewayModelsFilePath = path.join(
+			await this.ensureCacheDirectoryExists(),
+			GlobalFileNames.vercelAiGatewayModels,
+		)
+		const fileExists = await fileExistsAtPath(vercelAiGatewayModelsFilePath)
+		if (fileExists) {
+			const fileContents = await fs.readFile(vercelAiGatewayModelsFilePath, "utf8")
+			return JSON.parse(fileContents)
 		}
-		const relativePath = path.relative(cwd, filePath)
-		return "@/" + relativePath
-	}
-
-	// 'Add to Cline' context menu in editor and code action
-	async addSelectedCodeToChat(code: string, filePath: string, languageId: string, diagnostics?: vscode.Diagnostic[]) {
-		// Ensure the sidebar view is visible
-		await vscode.commands.executeCommand("claude-dev.SidebarProvider.focus")
-		await setTimeoutPromise(100)
-
-		// Post message to webview with the selected code
-		const fileMention = this.getFileMentionFromPath(filePath)
-
-		let input = `${fileMention}\n\`\`\`\n${code}\n\`\`\``
-		if (diagnostics) {
-			const problemsString = this.convertDiagnosticsToProblemsString(diagnostics)
-			input += `\nProblems:\n${problemsString}`
-		}
-
-		await this.postMessageToWebview({
-			type: "addToInput",
-			text: input,
-		})
-
-		console.log("addSelectedCodeToChat", code, filePath, languageId)
-	}
-
-	// 'Add to Cline' context menu in Terminal
-	async addSelectedTerminalOutputToChat(output: string, terminalName: string) {
-		// Ensure the sidebar view is visible
-		await vscode.commands.executeCommand("claude-dev.SidebarProvider.focus")
-		await setTimeoutPromise(100)
-
-		// Post message to webview with the selected terminal output
-		// await this.postMessageToWebview({
-		//     type: "addSelectedTerminalOutput",
-		//     output,
-		//     terminalName
-		// })
-
-		await this.postMessageToWebview({
-			type: "addToInput",
-			text: `Terminal output:\n\`\`\`\n${output}\n\`\`\``,
-		})
-
-		console.log("addSelectedTerminalOutputToChat", output, terminalName)
-	}
-
-	// 'Fix with Cline' in code actions
-	async fixWithCline(code: string, filePath: string, languageId: string, diagnostics: vscode.Diagnostic[]) {
-		// Ensure the sidebar view is visible
-		await vscode.commands.executeCommand("claude-dev.SidebarProvider.focus")
-		await setTimeoutPromise(100)
-
-		const fileMention = this.getFileMentionFromPath(filePath)
-		const problemsString = this.convertDiagnosticsToProblemsString(diagnostics)
-		await this.initTask(`Fix the following code in ${fileMention}\n\`\`\`\n${code}\n\`\`\`\n\nProblems:\n${problemsString}`)
-
-		console.log("fixWithCline", code, filePath, languageId, diagnostics, problemsString)
-	}
-
-	convertDiagnosticsToProblemsString(diagnostics: vscode.Diagnostic[]) {
-		let problemsString = ""
-		for (const diagnostic of diagnostics) {
-			let label: string
-			switch (diagnostic.severity) {
-				case vscode.DiagnosticSeverity.Error:
-					label = "Error"
-					break
-				case vscode.DiagnosticSeverity.Warning:
-					label = "Warning"
-					break
-				case vscode.DiagnosticSeverity.Information:
-					label = "Information"
-					break
-				case vscode.DiagnosticSeverity.Hint:
-					label = "Hint"
-					break
-				default:
-					label = "Diagnostic"
-			}
-			const line = diagnostic.range.start.line + 1 // VSCode lines are 0-indexed
-			const source = diagnostic.source ? `${diagnostic.source} ` : ""
-			problemsString += `\n- [${source}${label}] Line ${line}: ${diagnostic.message}`
-		}
-		problemsString = problemsString.trim()
-		return problemsString
+		return undefined
 	}
 
 	// Task history
@@ -1062,7 +555,7 @@ export class Controller {
 		taskMetadataFilePath: string
 		apiConversationHistory: Anthropic.MessageParam[]
 	}> {
-		const history = ((await getGlobalState(this.context, "taskHistory")) as HistoryItem[] | undefined) || []
+		const history = this.stateManager.getGlobalStateKey("taskHistory")
 		const historyItem = history.find((item) => item.id === id)
 		if (historyItem) {
 			const taskDirPath = path.join(this.context.globalStorageUri.fsPath, "tasks", id)
@@ -1090,145 +583,16 @@ export class Controller {
 		throw new Error("Task not found")
 	}
 
-	async showTaskWithId(id: string) {
-		if (id !== this.task?.taskId) {
-			// non-current task
-			const { historyItem } = await this.getTaskWithId(id)
-			await this.initTask(undefined, undefined, historyItem) // clears existing task
-		}
-		await this.postMessageToWebview({
-			type: "action",
-			action: "chatButtonClicked",
-		})
-	}
-
 	async exportTaskWithId(id: string) {
 		const { historyItem, apiConversationHistory } = await this.getTaskWithId(id)
 		await downloadTask(historyItem.ts, apiConversationHistory)
 	}
 
-	async deleteAllTaskHistory() {
-		await this.clearTask()
-		await updateGlobalState(this.context, "taskHistory", undefined)
-		try {
-			// Remove all contents of tasks directory
-			const taskDirPath = path.join(this.context.globalStorageUri.fsPath, "tasks")
-			if (await fileExistsAtPath(taskDirPath)) {
-				await fs.rm(taskDirPath, { recursive: true, force: true })
-			}
-			// Remove checkpoints directory contents
-			const checkpointsDirPath = path.join(this.context.globalStorageUri.fsPath, "checkpoints")
-			if (await fileExistsAtPath(checkpointsDirPath)) {
-				await fs.rm(checkpointsDirPath, { recursive: true, force: true })
-			}
-		} catch (error) {
-			vscode.window.showErrorMessage(
-				`Encountered error while deleting task history, there may be some files left behind. Error: ${error instanceof Error ? error.message : String(error)}`,
-			)
-		}
-		// await this.postStateToWebview()
-	}
-
-	async deleteNonFavoriteTaskHistory() {
-		await this.clearTask()
-
-		const taskHistory = ((await getGlobalState(this.context, "taskHistory")) as HistoryItem[]) || []
-		const favoritedTasks = taskHistory.filter((task) => task.isFavorited === true)
-
-		// If user has no favorited tasks, show a warning message
-		if (favoritedTasks.length === 0) {
-			vscode.window.showWarningMessage("No favorited tasks found. Please favorite tasks before using this option.")
-			await this.postStateToWebview()
-			return
-		}
-
-		await updateGlobalState(this.context, "taskHistory", favoritedTasks)
-
-		// Delete non-favorited task directories
-		try {
-			const preserveTaskIds = favoritedTasks.map((task) => task.id)
-			const taskDirPath = path.join(this.context.globalStorageUri.fsPath, "tasks")
-
-			if (await fileExistsAtPath(taskDirPath)) {
-				const taskDirs = await fs.readdir(taskDirPath)
-				for (const taskDir of taskDirs) {
-					if (!preserveTaskIds.includes(taskDir)) {
-						await fs.rm(path.join(taskDirPath, taskDir), { recursive: true, force: true })
-					}
-				}
-			}
-		} catch (error) {
-			vscode.window.showErrorMessage(
-				`Error deleting task history: ${error instanceof Error ? error.message : String(error)}`,
-			)
-		}
-
-		await this.postStateToWebview()
-	}
-
-	async refreshTotalTasksSize() {
-		getTotalTasksSize(this.context.globalStorageUri.fsPath)
-			.then((newTotalSize) => {
-				this.postMessageToWebview({
-					type: "totalTasksSize",
-					totalTasksSize: newTotalSize,
-				})
-			})
-			.catch((error) => {
-				console.error("Error calculating total tasks size:", error)
-			})
-	}
-
-	async deleteTaskWithId(id: string) {
-		console.info("deleteTaskWithId: ", id)
-
-		try {
-			if (id === this.task?.taskId) {
-				await this.clearTask()
-				console.debug("cleared task")
-			}
-
-			const {
-				taskDirPath,
-				apiConversationHistoryFilePath,
-				uiMessagesFilePath,
-				contextHistoryFilePath,
-				taskMetadataFilePath,
-			} = await this.getTaskWithId(id)
-			const legacyMessagesFilePath = path.join(taskDirPath, "claude_messages.json")
-			const updatedTaskHistory = await this.deleteTaskFromState(id)
-
-			// Delete the task files
-			for (const filePath of [
-				apiConversationHistoryFilePath,
-				uiMessagesFilePath,
-				contextHistoryFilePath,
-				taskMetadataFilePath,
-				legacyMessagesFilePath,
-			]) {
-				const fileExists = await fileExistsAtPath(filePath)
-				if (fileExists) {
-					await fs.unlink(filePath)
-				}
-			}
-
-			await fs.rmdir(taskDirPath) // succeeds if the dir is empty
-
-			if (updatedTaskHistory.length === 0) {
-				await this.deleteAllTaskHistory()
-			}
-		} catch (error) {
-			console.debug(`Error deleting task:`, error)
-		}
-
-		this.refreshTotalTasksSize()
-	}
-
 	async deleteTaskFromState(id: string) {
 		// Remove the task from history
-		const taskHistory = ((await getGlobalState(this.context, "taskHistory")) as HistoryItem[] | undefined) || []
+		const taskHistory = this.stateManager.getGlobalStateKey("taskHistory")
 		const updatedTaskHistory = taskHistory.filter((task) => task.id !== id)
-		await updateGlobalState(this.context, "taskHistory", updatedTaskHistory)
+		this.stateManager.setGlobalState("taskHistory", updatedTaskHistory)
 
 		// Notify the webview that the task has been deleted
 		await this.postStateToWebview()
@@ -1238,80 +602,110 @@ export class Controller {
 
 	async postStateToWebview() {
 		const state = await this.getStateToPostToWebview()
-		// For testing: Bypass gRPC stream and send state directly
-		console.log("[Controller Test Revert] Posting full state via direct 'state' message.")
-		await this.postMessageToWebview({ type: "state", state: state })
-		// await sendStateUpdate(state) // Original line for the GrPC stream
+		await sendStateUpdate(this.id, state)
 	}
 
 	async getStateToPostToWebview(): Promise<ExtensionState> {
-		const {
-			apiConfiguration,
-			lastShownAnnouncementId,
-			customInstructions,
-			taskHistory,
-			autoApprovalSettings,
-			browserSettings,
-			chatSettings,
-			userInfo,
-			mcpMarketplaceEnabled,
-			telemetrySetting,
-			planActSeparateModelsSetting,
-			enableCheckpointsSetting,
-			globalClineRulesToggles,
-			shellIntegrationTimeout,
-			isNewUser,
-		} = await getAllExtensionState(this.context)
+		// Get API configuration from cache for immediate access
+		const apiConfiguration = this.stateManager.getApiConfiguration()
+		const lastShownAnnouncementId = this.stateManager.getGlobalStateKey("lastShownAnnouncementId")
+		const taskHistory = this.stateManager.getGlobalStateKey("taskHistory")
+		const autoApprovalSettings = this.stateManager.getGlobalStateKey("autoApprovalSettings")
+		const browserSettings = this.stateManager.getGlobalStateKey("browserSettings")
+		const focusChainSettings = this.stateManager.getGlobalStateKey("focusChainSettings")
+		const focusChainFeatureFlagEnabled = this.stateManager.getGlobalStateKey("focusChainFeatureFlagEnabled")
+		const preferredLanguage = this.stateManager.getGlobalStateKey("preferredLanguage")
+		const openaiReasoningEffort = this.stateManager.getGlobalStateKey("openaiReasoningEffort")
+		const mode = this.stateManager.getGlobalStateKey("mode")
+		const strictPlanModeEnabled = this.stateManager.getGlobalStateKey("strictPlanModeEnabled")
+		const useAutoCondense = this.stateManager.getGlobalStateKey("useAutoCondense")
+		const userInfo = this.stateManager.getGlobalStateKey("userInfo")
+		const mcpMarketplaceEnabled = this.stateManager.getGlobalStateKey("mcpMarketplaceEnabled")
+		const mcpDisplayMode = this.stateManager.getGlobalStateKey("mcpDisplayMode")
+		const telemetrySetting = this.stateManager.getGlobalStateKey("telemetrySetting")
+		const planActSeparateModelsSetting = this.stateManager.getGlobalStateKey("planActSeparateModelsSetting")
+		const enableCheckpointsSetting = this.stateManager.getGlobalStateKey("enableCheckpointsSetting")
+		const globalClineRulesToggles = this.stateManager.getGlobalStateKey("globalClineRulesToggles")
+		const globalWorkflowToggles = this.stateManager.getGlobalStateKey("globalWorkflowToggles")
+		const shellIntegrationTimeout = this.stateManager.getGlobalStateKey("shellIntegrationTimeout")
+		const terminalReuseEnabled = this.stateManager.getGlobalStateKey("terminalReuseEnabled")
+		const defaultTerminalProfile = this.stateManager.getGlobalStateKey("defaultTerminalProfile")
+		const isNewUser = this.stateManager.getGlobalStateKey("isNewUser")
+		const welcomeViewCompleted = Boolean(
+			this.stateManager.getGlobalStateKey("welcomeViewCompleted") || this.authService.getInfo()?.user?.uid,
+		)
+		const customPrompt = this.stateManager.getGlobalStateKey("customPrompt")
+		const mcpResponsesCollapsed = this.stateManager.getGlobalStateKey("mcpResponsesCollapsed")
+		const terminalOutputLineLimit = this.stateManager.getGlobalStateKey("terminalOutputLineLimit")
+		const localClineRulesToggles = this.stateManager.getWorkspaceStateKey("localClineRulesToggles")
+		const localWindsurfRulesToggles = this.stateManager.getWorkspaceStateKey("localWindsurfRulesToggles")
+		const localCursorRulesToggles = this.stateManager.getWorkspaceStateKey("localCursorRulesToggles")
+		const workflowToggles = this.stateManager.getWorkspaceStateKey("workflowToggles")
 
-		const localClineRulesToggles =
-			((await getWorkspaceState(this.context, "localClineRulesToggles")) as ClineRulesToggles) || {}
+		const currentTaskItem = this.task?.taskId ? (taskHistory || []).find((item) => item.id === this.task?.taskId) : undefined
+		const clineMessages = this.task?.messageStateHandler.getClineMessages() || []
+		const checkpointManagerErrorMessage = this.task?.taskState.checkpointManagerErrorMessage
 
-		const localWindsurfRulesToggles =
-			((await getWorkspaceState(this.context, "localWindsurfRulesToggles")) as ClineRulesToggles) || {}
+		const processedTaskHistory = (taskHistory || [])
+			.filter((item) => item.ts && item.task)
+			.sort((a, b) => b.ts - a.ts)
+			.slice(0, 100) // for now we're only getting the latest 100 tasks, but a better solution here is to only pass in 3 for recent task history, and then get the full task history on demand when going to the task history view (maybe with pagination?)
 
-		const localCursorRulesToggles =
-			((await getWorkspaceState(this.context, "localCursorRulesToggles")) as ClineRulesToggles) || {}
-
-		const workflowToggles = ((await getWorkspaceState(this.context, "workflowToggles")) as ClineRulesToggles) || {}
+		const latestAnnouncementId = getLatestAnnouncementId(this.context)
+		const shouldShowAnnouncement = lastShownAnnouncementId !== latestAnnouncementId
+		const platform = process.platform as Platform
+		const distinctId = getDistinctId()
+		const version = this.context.extension?.packageJSON?.version ?? ""
+		const uriScheme = vscode.env.uriScheme
 
 		return {
-			version: this.context.extension?.packageJSON?.version ?? "",
+			version,
 			apiConfiguration,
-			customInstructions,
-			uriScheme: vscode.env.uriScheme,
-			currentTaskItem: this.task?.taskId ? (taskHistory || []).find((item) => item.id === this.task?.taskId) : undefined,
-			checkpointTrackerErrorMessage: this.task?.checkpointTrackerErrorMessage,
-			clineMessages: this.task?.clineMessages || [],
-			taskHistory: (taskHistory || [])
-				.filter((item) => item.ts && item.task)
-				.sort((a, b) => b.ts - a.ts)
-				.slice(0, 100), // for now we're only getting the latest 100 tasks, but a better solution here is to only pass in 3 for recent task history, and then get the full task history on demand when going to the task history view (maybe with pagination?)
-			shouldShowAnnouncement: lastShownAnnouncementId !== this.latestAnnouncementId,
-			platform: process.platform as Platform,
+			uriScheme,
+			currentTaskItem,
+			clineMessages,
+			currentFocusChainChecklist: this.task?.taskState.currentFocusChainChecklist || null,
+			checkpointManagerErrorMessage,
 			autoApprovalSettings,
 			browserSettings,
-			chatSettings,
+			focusChainSettings,
+			focusChainFeatureFlagEnabled,
+			preferredLanguage,
+			openaiReasoningEffort,
+			mode,
+			strictPlanModeEnabled,
+			useAutoCondense,
 			userInfo,
 			mcpMarketplaceEnabled,
+			mcpDisplayMode,
 			telemetrySetting,
 			planActSeparateModelsSetting,
 			enableCheckpointsSetting: enableCheckpointsSetting ?? true,
-			vscMachineId: vscode.env.machineId,
+			distinctId,
 			globalClineRulesToggles: globalClineRulesToggles || {},
 			localClineRulesToggles: localClineRulesToggles || {},
 			localWindsurfRulesToggles: localWindsurfRulesToggles || {},
 			localCursorRulesToggles: localCursorRulesToggles || {},
-			workflowToggles: workflowToggles || {},
+			localWorkflowToggles: workflowToggles || {},
+			globalWorkflowToggles: globalWorkflowToggles || {},
 			shellIntegrationTimeout,
+			terminalReuseEnabled,
+			defaultTerminalProfile,
 			isNewUser,
+			welcomeViewCompleted: welcomeViewCompleted as boolean, // Can be undefined but is set to either true or false by the migration that runs on extension launch in extension.ts
+			mcpResponsesCollapsed,
+			terminalOutputLineLimit,
+			customPrompt,
+			taskHistory: processedTaskHistory,
+			platform,
+			shouldShowAnnouncement,
 		}
 	}
 
 	async clearTask() {
 		if (this.task) {
-			await telemetryService.sendCollectedEvents(this.task.taskId)
 		}
-		this.task?.abortTask()
+		await this.task?.abortTask()
 		this.task = undefined // removes reference to it, so once promises end it will be garbage collected
 	}
 
@@ -1333,154 +727,15 @@ export class Controller {
 	For now we'll store the conversation history in memory, and if we need to store in state directly we'd need to do a manual conversion to ensure proper json stringification.
 	*/
 
-	// getApiConversationHistory(): Anthropic.MessageParam[] {
-	// 	// const history = (await this.getGlobalState(
-	// 	// 	this.getApiConversationHistoryStateKey()
-	// 	// )) as Anthropic.MessageParam[]
-	// 	// return history || []
-	// 	return this.apiConversationHistory
-	// }
-
-	// setApiConversationHistory(history: Anthropic.MessageParam[] | undefined) {
-	// 	// await this.updateGlobalState(this.getApiConversationHistoryStateKey(), history)
-	// 	this.apiConversationHistory = history || []
-	// }
-
-	// addMessageToApiConversationHistory(message: Anthropic.MessageParam): Anthropic.MessageParam[] {
-	// 	// const history = await this.getApiConversationHistory()
-	// 	// history.push(message)
-	// 	// await this.setApiConversationHistory(history)
-	// 	// return history
-	// 	this.apiConversationHistory.push(message)
-	// 	return this.apiConversationHistory
-	// }
-
 	async updateTaskHistory(item: HistoryItem): Promise<HistoryItem[]> {
-		const history = ((await getGlobalState(this.context, "taskHistory")) as HistoryItem[]) || []
+		const history = this.stateManager.getGlobalStateKey("taskHistory")
 		const existingItemIndex = history.findIndex((h) => h.id === item.id)
 		if (existingItemIndex !== -1) {
 			history[existingItemIndex] = item
 		} else {
 			history.push(item)
 		}
-		await updateGlobalState(this.context, "taskHistory", history)
+		this.stateManager.setGlobalState("taskHistory", history)
 		return history
 	}
-
-	// private async clearState() {
-	// 	this.context.workspaceState.keys().forEach((key) => {
-	// 		this.context.workspaceState.update(key, undefined)
-	// 	})
-	// 	this.context.globalState.keys().forEach((key) => {
-	// 		this.context.globalState.update(key, undefined)
-	// 	})
-	// 	this.context.secrets.delete("apiKey")
-	// }
-
-	// secrets
-
-	// Git commit message generation
-
-	async generateGitCommitMessage() {
-		try {
-			// Check if there's a workspace folder open
-			const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
-			if (!cwd) {
-				vscode.window.showErrorMessage("No workspace folder open")
-				return
-			}
-
-			// Get the git diff
-			const gitDiff = await getWorkingState(cwd)
-			if (gitDiff === "No changes in working directory") {
-				vscode.window.showInformationMessage("No changes in workspace for commit message")
-				return
-			}
-
-			// Show a progress notification
-			await vscode.window.withProgress(
-				{
-					location: vscode.ProgressLocation.Notification,
-					title: "Generating commit message...",
-					cancellable: false,
-				},
-				async (progress, token) => {
-					try {
-						// Format the git diff into a prompt
-						const prompt = `Based on the following git diff, generate a concise and descriptive commit message:
-
-${gitDiff.length > 5000 ? gitDiff.substring(0, 5000) + "\n\n[Diff truncated due to size]" : gitDiff}
-
-The commit message should:
-1. Start with a short summary (50-72 characters)
-2. Use the imperative mood (e.g., "Add feature" not "Added feature")
-3. Describe what was changed and why
-4. Be clear and descriptive
-
-Commit message:`
-
-						// Get the current API configuration
-						const { apiConfiguration } = await getAllExtensionState(this.context)
-
-						// Build the API handler
-						const apiHandler = buildApiHandler(apiConfiguration)
-
-						// Create a system prompt
-						const systemPrompt =
-							"You are a helpful assistant that generates concise and descriptive git commit messages based on git diffs."
-
-						// Create a message for the API
-						const messages = [
-							{
-								role: "user" as const,
-								content: prompt,
-							},
-						]
-
-						// Call the API directly
-						const stream = apiHandler.createMessage(systemPrompt, messages)
-
-						// Collect the response
-						let response = ""
-						for await (const chunk of stream) {
-							if (chunk.type === "text") {
-								response += chunk.text
-							}
-						}
-
-						// Extract the commit message
-						const commitMessage = extractCommitMessage(response)
-
-						// Apply the commit message to the Git input box
-						if (commitMessage) {
-							// Get the Git extension API
-							const gitExtension = vscode.extensions.getExtension("vscode.git")?.exports
-							if (gitExtension) {
-								const api = gitExtension.getAPI(1)
-								if (api && api.repositories.length > 0) {
-									const repo = api.repositories[0]
-									repo.inputBox.value = commitMessage
-									vscode.window.showInformationMessage("Commit message generated and applied")
-								} else {
-									vscode.window.showErrorMessage("No Git repositories found")
-								}
-							} else {
-								vscode.window.showErrorMessage("Git extension not found")
-							}
-						} else {
-							vscode.window.showErrorMessage("Failed to generate commit message")
-						}
-					} catch (innerError) {
-						const innerErrorMessage = innerError instanceof Error ? innerError.message : String(innerError)
-						vscode.window.showErrorMessage(`Failed to generate commit message: ${innerErrorMessage}`)
-					}
-				},
-			)
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			vscode.window.showErrorMessage(`Failed to generate commit message: ${errorMessage}`)
-		}
-	}
-
-	// dev
 }

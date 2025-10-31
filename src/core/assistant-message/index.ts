@@ -13,6 +13,7 @@ export const toolParamNames = [
 	"command",
 	"requires_approval",
 	"path",
+	"absolutePath",
 	"content",
 	"diff",
 	"regex",
@@ -38,6 +39,8 @@ export const toolParamNames = [
 	"additional_context",
 	"needs_more_exploration",
 	"task_progress",
+	"timeout",
+	"input",
 ] as const
 
 export type ToolParamName = (typeof toolParamNames)[number]
